@@ -1,0 +1,2 @@
+UNIT IV: Transaction Management and Concurrency Control
+This unit covers transaction schedules, ACID properties, serializability, conflict equivalence, and recoverability. Concurrency control includes two-phase locking, shared and exclusive locks, deadlock prevention, deadlock detection, and timestamp ordering protocols. The syllabus also describes transaction commit and rollback behavior.
