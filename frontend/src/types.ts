@@ -182,6 +182,11 @@ export interface SyllabusExtractData {
   semester?: string;
   subject?: string;
   uploadedAt?: string;
+  subjectCompatibility?: {
+    compatible: boolean;
+    selectedSubject: string;
+    detectedTopic?: string;
+  };
 }
 
 export interface AuditLog {
@@ -223,14 +228,42 @@ export interface Question {
   status?: 'DRAFT' | 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
   source?: 'MANUAL' | 'AI_GENERATED';
   syllabusSource?: string;
-  reviewStatus?: 'PENDING_TEACHER_REVIEW' | 'APPROVED';
+  reviewStatus?: 'PENDING_TEACHER_REVIEW' | 'APPROVED' | 'DISCARDED';
   syllabusId?: string;
   syllabusUnit?: string;
   syllabusTopic?: string;
   sourceReference?: string;
+  generationId?: string;
+  aiProvider?: 'GEMINI' | 'GROQ';
+  aiModel?: string;
   createdBy?: string;
   createdByName?: string;
   createdAt?: string;
+}
+
+export interface AiGenerationBatch {
+  generationId: string;
+  generatedBy: string;
+  generatedByName: string;
+  subject: string;
+  course: string;
+  semester: string;
+  topic: string;
+  difficulty: Difficulty | 'MIXED';
+  marksPerQuestion: number;
+  requestedCount: number;
+  generatedCount: number;
+  syllabusId: string;
+  sourceFileName: string;
+  provider: 'GEMINI' | 'GROQ';
+  aiModel: string;
+  generatedAt: string;
+  pendingCount: number;
+  approvedCount: number;
+  discardedCount: number;
+  reviewStatus: 'PENDING_REVIEW' | 'PARTIALLY_REVIEWED' | 'APPROVED' | 'DISCARDED';
+  questionIds?: string[];
+  legacy?: boolean;
 }
 
 export interface ExamAnswerRecord {

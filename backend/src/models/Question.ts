@@ -23,6 +23,7 @@ export interface IQuestionDocument extends Document {
   syllabusUnit?: string;
   syllabusTopic?: string;
   sourceReference?: string;
+  generationId?: string;
   aiProvider?: 'GEMINI' | 'GROQ';
   aiModel?: string;
   dedupeKey?: string;
@@ -142,12 +143,13 @@ const QuestionSchema = new Schema<IQuestionDocument>(
     },
     reviewStatus: {
       type: String,
-      enum: ['PENDING_TEACHER_REVIEW', 'APPROVED']
+      enum: ['PENDING_TEACHER_REVIEW', 'APPROVED', 'DISCARDED']
     },
     syllabusId: { type: String, index: true },
     syllabusUnit: { type: String, trim: true },
     syllabusTopic: { type: String, trim: true },
     sourceReference: { type: String, trim: true },
+    generationId: { type: String, trim: true, index: true },
     aiProvider: { type: String, enum: ['GEMINI', 'GROQ'] },
     aiModel: { type: String, trim: true },
     dedupeKey: { type: String, unique: true, sparse: true, select: false },
@@ -178,5 +180,6 @@ const QuestionSchema = new Schema<IQuestionDocument>(
 QuestionSchema.index({ createdBy: 1, subject: 1 });
 QuestionSchema.index({ subject: 1, topic: 1 });
 QuestionSchema.index({ createdBy: 1, source: 1, reviewStatus: 1, status: 1 });
+QuestionSchema.index({ generationId: 1, createdBy: 1 });
 
 export const Question = mongoose.model<IQuestionDocument>('Question', QuestionSchema);

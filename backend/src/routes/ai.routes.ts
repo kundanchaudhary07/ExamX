@@ -10,6 +10,7 @@ import {
   validateAndExtractSyllabus
 } from '../utils/syllabusExtractor';
 import { AuthenticatedRequest } from '../types/auth.types';
+import { AiGenerationBatchService } from '../services/ai-generation-batch.service';
 
 const router = Router();
 
@@ -154,6 +155,33 @@ router.get(
     try {
       const drafts = await QuestionService.getAiDrafts(req.user!);
       res.status(200).json({ success: true, data: { drafts, count: drafts.length } });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  '/generation-batches',
+  requireRole('TEACHER', 'ADMIN'),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const batches = await AiGenerationBatchService.list(req.user!);
+      res.status(200).json({ success: true, data: { batches } });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  '/generation-batches/:generationId/questions',
+  requireRole('TEACHER', 'ADMIN'),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const generationId = typeof req.params.generationId === 'string' ? req.params.generationId : '';
+      const questions = await AiGenerationBatchService.getQuestions(generationId, req.user!);
+      res.status(200).json({ success: true, data: { questions } });
     } catch (err) {
       next(err);
     }

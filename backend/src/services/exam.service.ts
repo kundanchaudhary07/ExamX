@@ -10,6 +10,7 @@ import { generateNextExamId } from '../utils/exam-id.generator';
 import { AuditService } from './audit.service';
 import { emitExamEvent, emitNotification } from '../realtime/socket';
 import { logger } from '../utils/logger';
+import { SubjectService } from './subject.service';
 
 export const CANONICAL_COURSES = [
   'B.Tech CSE',
@@ -409,6 +410,7 @@ export class ExamService {
 
     const normalizedCourse = this.normalizeCourse(input.course);
     const normalizedSemester = this.normalizeSemester(input.semester);
+    const normalizedSubject = await SubjectService.ensure(input.subject, user.userId);
 
     // Validate requested creation status — never allow bypassing lifecycle by creating as LIVE/ENDED/PUBLISHED
     const requestedStatus = (input as any).status as ExamStatus | undefined;
@@ -429,7 +431,7 @@ export class ExamService {
     const { cleanQuestions, calculatedMarks } = await this.resolveAndValidateQuestions(
       rawQuestions,
       user,
-      { subject: input.subject, course: normalizedCourse, semester: normalizedSemester }
+      { subject: normalizedSubject, course: normalizedCourse, semester: normalizedSemester }
     );
 
     // Zero-question rule: SCHEDULED requires at least 1 valid question; DRAFT allows 0 questions
@@ -498,7 +500,7 @@ export class ExamService {
       examId,
       title: input.title.trim().replace(/\s+/g, ' '),
       description: (input.description || '').trim(),
-      subject: input.subject.trim().replace(/\s+/g, ' '),
+      subject: normalizedSubject,
       course: normalizedCourse,
       department: (input.department || '').trim(),
       academicYear: (input.academicYear || '').trim(),
@@ -1550,4 +1552,3 @@ export class ExamService {
     };
   }
 }
-

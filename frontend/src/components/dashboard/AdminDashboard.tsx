@@ -10,6 +10,7 @@ import {
   StudentResult,
   StudentQuery,
   Question,
+  AiGenerationBatch,
   ProctoringEventRecord,
   ExamAttemptRecord
 } from '../../types';
@@ -24,6 +25,7 @@ import {
 } from '../../constants';
 import { dbService } from '../../services/dbService';
 import { realtimeService } from '../../services/realtimeService';
+import { AiGenerationBatchCards } from './AiGenerationBatchCards';
 import {
   Modal,
   FormSection,
@@ -119,6 +121,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [teachers, setTeachers] = useState<SystemUser[]>([]);
   const [students, setStudents] = useState<SystemUser[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [aiGenerationBatches, setAiGenerationBatches] = useState<AiGenerationBatch[]>([]);
   const [proctoringEvents, setProctoringEvents] = useState<ProctoringEventRecord[]>([]);
   const [attempts, setAttempts] = useState<ExamAttemptRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -218,7 +221,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsLoadingData(true);
     setLoadError(null);
     try {
-      const [teacherList, studentList, questionList, proctorList, logs, health, attemptList] = await Promise.all([
+      const [teacherList, studentList, questionList, proctorList, logs, health, attemptList, generationBatches] = await Promise.all([
         dbService.getTeachers(),
         dbService.getStudents(),
         dbService.getQuestions().catch(() => []),
@@ -227,11 +230,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         fetch('/api/health')
           .then(r => r.json())
           .catch(() => ({ status: 'healthy', database: 'connected' })),
-        dbService.getAttempts().catch(() => [])
+        dbService.getAttempts().catch(() => []),
+        dbService.getAiGenerationBatches()
       ]);
       setTeachers(teacherList);
       setStudents(studentList);
       setQuestions(questionList);
+      setAiGenerationBatches(generationBatches);
       setProctoringEvents(proctorList);
       setAttempts(attemptList);
       setAuditLogs(logs);
@@ -653,6 +658,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     q => q.source === 'AI_GENERATED' || q.createdBy === 'AI'
   ).length;
   const manualQuestionsCount = questions.length - aiQuestionsCount;
+  const isAiQuestion = (question: Question) =>
+    question.source === 'AI_GENERATED' || question.createdBy === 'AI';
+  const batchQuestionIds = new Set(aiGenerationBatches.flatMap((batch) => batch.questionIds || []));
+  const manualQuestions = questions.filter((question) => !isAiQuestion(question));
+  const unbatchedAiQuestions = questions.filter(
+    (question) => isAiQuestion(question) && !batchQuestionIds.has(question.questionId || question.id)
+  );
+  const questionSearchTextByBatch = Object.fromEntries(
+    aiGenerationBatches.map((batch) => [
+      batch.generationId,
+      (batch.questionIds || [])
+        .map((questionId) => questions.find((question) => (question.questionId || question.id) === questionId)?.text || '')
+        .join(' ')
+    ])
+  );
   const uniqueSubjectsCount = Array.from(
     new Set(questions.map(q => q.subject?.trim() || q.topic?.trim()).filter(Boolean))
   ).length;
@@ -1332,9 +1352,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Question Bank ({questions.length})
               </h2>
             </div>
-          {questions.length === 0 ? (
+          <div className="p-5">
+            <AiGenerationBatchCards
+              batches={aiGenerationBatches}
+              questionSearchTextByBatch={questionSearchTextByBatch}
+              unbatchedQuestions={unbatchedAiQuestions}
+              onViewQuestion={setSelectedQuestionDetail}
+              onDeleteQuestion={(question) => handleDeleteQuestion(question.questionId || question.id)}
+            />
+          </div>
+          {manualQuestions.length === 0 ? (
             <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No questions yet.
+              {questions.length > 0 || aiGenerationBatches.length > 0
+                ? 'No manual questions match this search.'
+                : 'No questions yet.'}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1353,7 +1384,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {questions.map(q => (
+                  {manualQuestions.map(q => (
                     <tr key={q.questionId || q.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
                       <td className="p-3.5 whitespace-nowrap">
                         <button

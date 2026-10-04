@@ -7,7 +7,9 @@ import { User } from '../src/models/User';
 import { Question } from '../src/models/Question';
 import { Syllabus } from '../src/models/Syllabus';
 import { Exam } from '../src/models/Exam';
+import { Subject } from '../src/models/Subject';
 import { ENV } from '../src/config/env';
+import { AiQuestionService } from '../src/services/ai.service';
 
 async function runPhase17QuestionBankAiTests() {
   console.log('--- STARTING PHASE 1.7 QUESTION BANK & AI SYLLABUS GENERATION TEST SUITE ---');
@@ -20,6 +22,7 @@ async function runPhase17QuestionBankAiTests() {
   await new Promise<void>(resolve => server.listen(0, resolve));
   const address = server.address() as any;
   const baseUrl = `http://127.0.0.1:${address.port}`;
+  const customSubjectName = `Test Custom Subject ${Date.now()}`;
 
   async function apiRequest(method: string, path: string, body?: any, token?: string) {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -111,6 +114,28 @@ async function runPhase17QuestionBankAiTests() {
     const student1Token = s1Login.body.data.token;
 
     console.log('✓ 1. Roles and authentication setup passed');
+
+    const subjectCreate = await apiRequest('POST', '/api/subjects', { name: customSubjectName }, teacherAToken);
+    assert.strictEqual(subjectCreate.status, 200);
+    const duplicateSubjectCreate = await apiRequest(
+      'POST',
+      '/api/subjects',
+      { name: `  ${customSubjectName.toUpperCase()}  ` },
+      teacherBToken
+    );
+    assert.strictEqual(duplicateSubjectCreate.status, 200);
+    assert.strictEqual(duplicateSubjectCreate.body.data.subject, customSubjectName);
+    const subjectSuggestions = await apiRequest('GET', '/api/subjects', undefined, teacherAToken);
+    assert.strictEqual(
+      subjectSuggestions.body.data.subjects.filter((name: string) => name.toLowerCase() === customSubjectName.toLowerCase()).length,
+      1,
+      'Custom subject suggestions must be unique across casing and whitespace variants'
+    );
+    const studentSubjectCreate = await apiRequest('POST', '/api/subjects', { name: 'Student Forbidden Subject' }, student1Token);
+    assert.strictEqual(studentSubjectCreate.status, 403);
+    const invalidSubjectCreate = await apiRequest('POST', '/api/subjects', { name: ' \t ' }, teacherAToken);
+    assert.strictEqual(invalidSubjectCreate.status, 400);
+    console.log('✓ Subject search, create, normalization, and role access passed');
 
     // 2. QUESTION VALIDATION TESTS
     // 2.1 Missing / empty questionText
@@ -381,7 +406,7 @@ async function runPhase17QuestionBankAiTests() {
     // 6.1 Status endpoint check
     const aiStatusRes = await apiRequest('GET', '/api/ai/status', undefined, teacherAToken);
     assert.strictEqual(aiStatusRes.status, 200);
-    const expectedAiStatus = process.env.GEMINI_API_KEY ? 'READY' : 'NOT_CONFIGURED';
+    const expectedAiStatus = AiQuestionService.isConfigured() ? 'READY' : 'NOT_CONFIGURED';
     assert.strictEqual(aiStatusRes.body.data.status, expectedAiStatus, 'AI status must reflect whether the Gemini provider is configured');
 
     // 6.2 Student access to AI generation is denied (403)
@@ -434,7 +459,7 @@ Dynamic Programming: Matrix Chain Multiplication, Longest Common Subsequence, Kn
     assert.strictEqual(studentDrafts.status, 403, 'Students cannot access AI review drafts');
 
     // 6.4 Generate only from the persisted, owner-authorized syllabus
-    if (!process.env.GEMINI_API_KEY) {
+    if (!AiQuestionService.isConfigured()) {
       const genRes = await apiRequest('POST', '/api/ai/questions/generate', {
         syllabusId: uploadRes.body.data.syllabusId,
         subject: 'Advanced Data Structures',
@@ -460,11 +485,11 @@ Dynamic Programming: Matrix Chain Multiplication, Longest Common Subsequence, Kn
         count: 3,
         marks: 3
       }, teacherAToken);
-      if (genRes.status === 503) {
-        assert.strictEqual(genRes.body.code, 'AI_GENERATION_TEMPORARILY_UNAVAILABLE');
-        console.log('ℹ 6. Live Gemini temporarily unavailable (503); verified AI_GENERATION_TEMPORARILY_UNAVAILABLE handling.');
+      if (genRes.status !== 200) {
+        assert([400, 401, 403, 429, 500, 502, 503].includes(genRes.status), 'Provider errors must retain their real status');
+        assert.strictEqual(await Question.countDocuments({ syllabusId: uploadRes.body.data.syllabusId }), 0);
+        console.log(`ℹ 6. Live AI provider returned ${genRes.status}; verified zero-question failure behavior.`);
       } else {
-        assert.strictEqual(genRes.status, 200);
         const drafts = genRes.body.data.generated || genRes.body.data.questions;
         assert.strictEqual(drafts.length, 3);
 
@@ -551,6 +576,7 @@ Dynamic Programming: Matrix Chain Multiplication, Longest Common Subsequence, Kn
     console.log('================================================================');
 
   } finally {
+    await Subject.deleteOne({ normalizedName: customSubjectName.toLocaleLowerCase() });
     server.close();
     await disconnectDatabase();
   }

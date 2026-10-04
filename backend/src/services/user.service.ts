@@ -21,7 +21,8 @@ import {
   generateNextTeacherId,
   generateNextStudentId,
   generateInitialPassword,
-  extractBirthYear
+  extractBirthYear,
+  createStudentWithGeneratedId
 } from '../utils/credential.generator';
 
 const VALID_STATUSES: UserStatus[] = ['ACTIVE', 'INACTIVE', 'BLOCKED'];
@@ -379,8 +380,6 @@ export class UserService {
     const parsedYear = extractBirthYear(dobInput);
 
     // 1. Authoritative Backend Generation of Student ID (^1261[0-9]{4}$)
-    const studentId = await generateNextStudentId();
-
     // 2. Authoritative Backend Generation of Initial Password (Name@DOB-Year)
     const initialPlainPassword = generateInitialPassword(data.name, parsedYear);
 
@@ -400,29 +399,31 @@ export class UserService {
         : [];
 
     // 5. Persist in MongoDB (strictly only passwordHash)
-    const student = await User.create({
-      userId: studentId,
-      name: data.name.trim(),
-      email: typeof data.email === 'string' ? data.email.trim() : '',
-      phone: typeof data.phone === 'string' ? data.phone.trim() : '',
-      dob: typeof data.dob === 'string' ? data.dob.trim() : String(parsedYear),
-      dobYear: parsedYear,
-      passwordHash,
-      role: 'STUDENT',
-      status: 'ACTIVE',
-      enrollmentNo:
-        typeof data.enrollmentNo === 'string' && data.enrollmentNo.trim()
-          ? data.enrollmentNo.trim()
-          : studentId,
-      course: typeof data.course === 'string' ? data.course.trim() : '',
-      department: typeof data.department === 'string' ? data.department.trim() : '',
-      academicYear: typeof data.academicYear === 'string' ? data.academicYear.trim() : '',
-      semester: typeof data.semester === 'string' ? data.semester.trim() : '',
-      section: typeof data.section === 'string' ? data.section.trim() : '',
-      managedBy,
-      teacherIds: managedBy,
-      createdBy: requester.userId
-    });
+    const student = await createStudentWithGeneratedId(async studentId =>
+      User.create({
+        userId: studentId,
+        name: data.name.trim(),
+        email: typeof data.email === 'string' ? data.email.trim() : '',
+        phone: typeof data.phone === 'string' ? data.phone.trim() : '',
+        dob: typeof data.dob === 'string' ? data.dob.trim() : String(parsedYear),
+        dobYear: parsedYear,
+        passwordHash,
+        role: 'STUDENT',
+        status: 'ACTIVE',
+        enrollmentNo:
+          typeof data.enrollmentNo === 'string' && data.enrollmentNo.trim()
+            ? data.enrollmentNo.trim()
+            : studentId,
+        course: typeof data.course === 'string' ? data.course.trim() : '',
+        department: typeof data.department === 'string' ? data.department.trim() : '',
+        academicYear: typeof data.academicYear === 'string' ? data.academicYear.trim() : '',
+        semester: typeof data.semester === 'string' ? data.semester.trim() : '',
+        section: typeof data.section === 'string' ? data.section.trim() : '',
+        managedBy,
+        teacherIds: managedBy,
+        createdBy: requester.userId
+      })
+    );
 
     await AuditService.record({
       actorId: requester.userId,
@@ -912,5 +913,4 @@ export class UserService {
     return this.updateStudent(targetUserId, { status }, requester);
   }
 }
-
 

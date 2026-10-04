@@ -12,7 +12,7 @@
     "seed:admin": "tsx backend/scripts/seed-admin.ts",
     "test": "npm run test:backend && npm run test:ai",
     "test:backend": "cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test tsx backend/scripts/reset-test-db.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/phase1-2-exam-core.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test tsx backend/scripts/reset-test-db.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/phase1-5-exam-lifecycle-strict.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test tsx backend/scripts/reset-test-db.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/phase1-6-master-e2e-three-role.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test tsx backend/scripts/reset-test-db.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/phase1-7-question-bank-ai.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test tsx backend/scripts/reset-test-db.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/mongodb-config-requirement.test.ts",
-    "test:ai": "cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/ai-config-safety.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/syllabus-extractor.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/ai-retry.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/groq-provider.test.ts",
+    "test:ai": "cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/ai-config-safety.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/syllabus-extractor.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/ai-retry.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/groq-provider.test.ts && cross-env NODE_ENV=test MONGODB_URI=mongodb://localhost:27017/examx_test ALLOW_EMBEDDED_MONGO=true tsx backend/tests/student-signup.test.ts",
     "lint": "tsc --noEmit --project frontend/tsconfig.json && tsc --noEmit --project backend/tsconfig.json"
   },
   "dependencies": {
@@ -26,6 +26,7 @@
     "groq-sdk": "^1.6.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.555.0",
     "mammoth": "^1.13.0",
     "mongodb-memory-server": "^11.3.0",

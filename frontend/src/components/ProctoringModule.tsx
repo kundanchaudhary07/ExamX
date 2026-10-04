@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState, useCallback } from 'react';
 import { Camera, AlertTriangle, ShieldCheck, EyeOff, Maximize2, Loader2, RefreshCw } from 'lucide-react';
 import { ProctorLog, ProctoringEventRecord } from '../types';
 
@@ -25,16 +25,24 @@ interface ProctoringProps {
   maxWarnings?: number;
 }
 
-export const ProctoringModule: React.FC<ProctoringProps> = ({
+export interface ProctoringHandle {
+  stopMediaStream: () => void;
+}
+
+export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
   onViolation,
   onProctoringEvent,
   onScreenshotDetected,
   isExamActive,
   warningCount = 0,
   maxWarnings = 5
-}) => {
+}, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const streamRequestIdRef = useRef(0);
+  const faceDetectionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isExamActiveRef = useRef(isExamActive);
+  isExamActiveRef.current = isExamActive;
   const [cameraState, setCameraState] = useState<CameraPermissionState>('IDLE');
   const [hasActiveLiveFeed, setHasActiveLiveFeed] = useState<boolean>(false);
   const [cameraErrorMessage, setCameraErrorMessage] = useState<string>('');
@@ -108,17 +116,32 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
     []
   );
 
-  const stopWebcam = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+  const stopMediaStream = useCallback(() => {
+    streamRequestIdRef.current += 1;
+
+    if (faceDetectionIntervalRef.current !== null) {
+      clearInterval(faceDetectionIntervalRef.current);
+      faceDetectionIntervalRef.current = null;
     }
+
+    const stream = streamRef.current;
+    streamRef.current = null;
+    stream?.getTracks().forEach((track) => {
+      track.onmute = null;
+      track.onunmute = null;
+      track.onended = null;
+      track.stop();
+    });
+
     if (videoRef.current) {
+      videoRef.current.pause();
       videoRef.current.srcObject = null;
     }
     setHasActiveLiveFeed(false);
     setCameraState('STOPPED');
   }, []);
+
+  useImperativeHandle(ref, () => ({ stopMediaStream }), [stopMediaStream]);
 
   const attachStreamToVideo = useCallback((video: HTMLVideoElement | null, stream: MediaStream | null) => {
     if (!video || !stream) return;
@@ -140,8 +163,14 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
         if (playPromise !== undefined) {
           playPromise
             .then(() => {
-              setHasActiveLiveFeed(true);
-              setCameraState('ACTIVE');
+              if (
+                stream === streamRef.current &&
+                isExamActiveRef.current &&
+                stream.getVideoTracks().some((track) => track.readyState === 'live')
+              ) {
+                setHasActiveLiveFeed(true);
+                setCameraState('ACTIVE');
+              }
             })
             .catch(() => {
               // Browser may await loadedmetadata or user interaction
@@ -181,16 +210,14 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
 
     // Clean up any dead stream before starting fresh
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+      stopMediaStream();
     }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
+    const requestId = ++streamRequestIdRef.current;
     setHasActiveLiveFeed(false);
     setCameraState('REQUESTING');
     setCameraErrorMessage('');
 
+    let acquiredStream: MediaStream | null = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -200,13 +227,20 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
         },
         audio: false
       });
+      acquiredStream = stream;
+
+      if (requestId !== streamRequestIdRef.current || !isExamActiveRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      streamRef.current = stream;
 
       const videoTracks = stream.getVideoTracks();
       if (!videoTracks || videoTracks.length === 0) {
         throw new Error('No live video track returned from camera.');
       }
 
-      streamRef.current = stream;
       setCameraState('GRANTED');
 
       if (videoRef.current) {
@@ -215,19 +249,27 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
 
       const videoTrack = videoTracks[0];
       videoTrack.onmute = () => {
+        if (streamRef.current !== stream || !isExamActiveRef.current) return;
         setHasActiveLiveFeed(false);
         triggerEvent('CAMERA_BLOCKED', 'HIGH', 'Camera feed muted or blocked during active examination');
       };
       videoTrack.onunmute = () => {
+        if (streamRef.current !== stream || !isExamActiveRef.current) return;
         setHasActiveLiveFeed(true);
         setCameraState('ACTIVE');
       };
       videoTrack.onended = () => {
+        if (streamRef.current !== stream || !isExamActiveRef.current) return;
         setHasActiveLiveFeed(false);
         setCameraState('STOPPED');
         triggerEvent('CAMERA_OFF', 'HIGH', 'Camera feed disconnected during active examination');
       };
     } catch (err: any) {
+      if (acquiredStream && streamRef.current === acquiredStream) {
+        stopMediaStream();
+      } else if (acquiredStream) {
+        acquiredStream.getTracks().forEach((track) => track.stop());
+      }
       setHasActiveLiveFeed(false);
       const errorName = err?.name || '';
       if (errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError') {
@@ -256,28 +298,34 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
         );
       }
     }
-  }, [triggerEvent, attachStreamToVideo]);
+  }, [triggerEvent, attachStreamToVideo, stopMediaStream]);
 
   // Lifecycle Management: Camera starts ONLY when isExamActive is true, stops completely when false
   useEffect(() => {
     if (isExamActive) {
       startWebcam();
     } else {
-      stopWebcam();
+      stopMediaStream();
     }
 
     return () => {
-      stopWebcam();
+      stopMediaStream();
     };
-  }, [isExamActive, startWebcam, stopWebcam]);
+  }, [isExamActive, startWebcam, stopMediaStream]);
 
   // Synchronize stream attachment when video element finishes loading metadata
   const handleVideoLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     const video = e.currentTarget;
     video.muted = true;
     video.play().then(() => {
-      setHasActiveLiveFeed(true);
-      setCameraState('ACTIVE');
+      if (
+        streamRef.current &&
+        isExamActiveRef.current &&
+        streamRef.current.getVideoTracks().some((track) => track.readyState === 'live')
+      ) {
+        setHasActiveLiveFeed(true);
+        setCameraState('ACTIVE');
+      }
     }).catch(() => {});
   };
 
@@ -285,13 +333,23 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
     const video = e.currentTarget;
     video.muted = true;
     video.play().then(() => {
-      setHasActiveLiveFeed(true);
-      setCameraState('ACTIVE');
+      if (
+        streamRef.current &&
+        isExamActiveRef.current &&
+        streamRef.current.getVideoTracks().some((track) => track.readyState === 'live')
+      ) {
+        setHasActiveLiveFeed(true);
+        setCameraState('ACTIVE');
+      }
     }).catch(() => {});
   };
 
   const handleVideoPlaying = () => {
-    if (streamRef.current && streamRef.current.getVideoTracks().some(t => t.readyState === 'live')) {
+    if (
+      isExamActiveRef.current &&
+      streamRef.current &&
+      streamRef.current.getVideoTracks().some((track) => track.readyState === 'live')
+    ) {
       setHasActiveLiveFeed(true);
       setCameraState('ACTIVE');
     }
@@ -394,6 +452,9 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
     if (!isExamActive || cameraState !== 'ACTIVE') return;
 
     let consecutiveNoFaceCount = 0;
+    const stream = streamRef.current;
+    if (!stream) return;
+
     const interval = setInterval(async () => {
       if (!videoRef.current || videoRef.current.readyState < 2) return;
 
@@ -401,6 +462,7 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
         if (typeof (window as any).FaceDetector !== 'undefined') {
           const detector = new (window as any).FaceDetector({ maxDetectedFaces: 5, fastMode: true });
           const faces = await detector.detect(videoRef.current);
+          if (stream !== streamRef.current || !isExamActiveRef.current) return;
           if (faces.length === 0) {
             consecutiveNoFaceCount++;
             if (consecutiveNoFaceCount >= 3) {
@@ -417,8 +479,14 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
         // Face detection non-critical fallback
       }
     }, 4500);
+    faceDetectionIntervalRef.current = interval;
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (faceDetectionIntervalRef.current === interval) {
+        faceDetectionIntervalRef.current = null;
+      }
+    };
   }, [isExamActive, cameraState, triggerEvent]);
 
   const requestExamFullscreen = async () => {
@@ -576,4 +644,6 @@ export const ProctoringModule: React.FC<ProctoringProps> = ({
       </div>
     </div>
   );
-};
+});
+
+ProctoringModule.displayName = 'ProctoringModule';

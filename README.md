@@ -71,7 +71,8 @@ project-root/
    - `correctOption` / `correctAnswer` and `explanation` are strictly stripped from all student-facing endpoints during active examinations.
 2. **AI Question Generation (`/api/ai/questions/generate` & `/api/ai/status`)**:
    - Backend-only `GEMINI` (`gemini-3.8-flash`) and `GROQ` (`openai/gpt-oss-120b`) providers are selected with `AI_PROVIDER`; configure the matching key in the root environment. No provider key is exposed in frontend code or `VITE_*` variables, and provider failures do not fall back to another provider.
-   - Syllabus-grounded structured drafts require explicit teacher review before approval moves them into the active Question Bank.
+   - Generation counts accept whole numbers from 1 to 200. Each run persists a batch record linked to its questions; teachers see only their own batches and drafts, while admins can inspect all batches.
+   - Syllabus-grounded structured drafts require explicit teacher review before approval moves them into the active Question Bank. Subjects are searchable and can be registered through the teacher/admin API.
 3. **Exam & Assignment (`/api/exams`)**:
    - Controlled lifecycle: `DRAFT`, `SCHEDULED`, `LIVE`, `ENDED`, `PUBLISHED`, `CLOSED`, `ARCHIVED`.
    - Teachers can only assign students under their supervision (`managedBy`).

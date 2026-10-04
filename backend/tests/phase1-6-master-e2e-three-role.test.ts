@@ -13,6 +13,7 @@ import { StudentQuery } from '../src/models/StudentQuery';
 import { ProctoringEvent } from '../src/models/ProctoringEvent';
 import { Syllabus } from '../src/models/Syllabus';
 import { ENV } from '../src/config/env';
+import { AiQuestionService } from '../src/services/ai.service';
 
 async function runMasterE2ETests() {
   console.log('=== STARTING EXAMX MASTER REMAINING THREE-ROLE E2E INTEGRATION TEST ===');
@@ -156,7 +157,7 @@ Timestamp Ordering Protocol: Thomas write rule and multiversion concurrency cont
     const selectedQuestionIds = [manualQId];
     const expectedAnswers = [{ questionId: manualQId, selectedOption: 'A' }];
 
-    if (!process.env.GEMINI_API_KEY) {
+    if (!AiQuestionService.isConfigured()) {
       const noKeyResponse = await apiRequest('POST', '/api/ai/questions/generate', {
         syllabusId: syllabusUpload.body.data.syllabusId,
         subject: 'Database Management Systems',
@@ -193,9 +194,13 @@ Timestamp Ordering Protocol: Thomas write rule and multiversion concurrency cont
         selectedQuestionIds.push(drafts[0].questionId);
         expectedAnswers.push({ questionId: drafts[0].questionId, selectedOption: drafts[0].correctOption });
       } else {
-        assert.strictEqual(aiGenRes.status, 503, 'When live provider is constrained, status must be 503');
-        assert.strictEqual(aiGenRes.body.code, 'AI_GENERATION_TEMPORARILY_UNAVAILABLE');
-        console.log('ℹ Live Gemini temporarily unavailable (503); proceeding with manual question');
+        assert([400, 401, 403, 429, 500, 502, 503].includes(aiGenRes.status), 'Provider failures must retain a real provider error status');
+        assert.strictEqual(
+          await Question.countDocuments({ syllabusId: syllabusUpload.body.data.syllabusId }),
+          0,
+          'A failed provider generation must not persist any AI questions'
+        );
+        console.log(`ℹ Live AI provider returned ${aiGenRes.status}; no generated questions were persisted.`);
       }
     }
 

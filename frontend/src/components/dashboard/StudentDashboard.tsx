@@ -73,6 +73,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const [proctoringEvents, setProctoringEvents] = useState<ProctoringEventRecord[]>([]);
   const [isLoadingProctoring, setIsLoadingProctoring] = useState(false);
   const [proctoringError, setProctoringError] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [passwordChangeMessage, setPasswordChangeMessage] = useState('');
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
 
   // Detail Modals
   const [selectedExam, setSelectedExam] = useState<ScheduledExam | null>(null);
@@ -196,6 +201,29 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     : 'CLEAN';
 
   const { confirmAction, ConfirmModal } = useConfirmAction();
+
+  const handleChangePassword = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setPasswordChangeMessage('');
+    if (newPassword !== confirmNewPassword) {
+      setPasswordChangeMessage('New passwords do not match.');
+      return;
+    }
+    setIsChangingPassword(true);
+    try {
+      await dbService.changeStudentPassword(currentPassword, newPassword);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setPasswordChangeMessage('Password changed successfully.');
+    } catch (error) {
+      setPasswordChangeMessage(
+        error instanceof Error ? error.message : 'Unable to change password.'
+      );
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
 
   const handleLaunchExam = (exam: ScheduledExam) => {
     confirmAction({
@@ -1050,6 +1078,54 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               <StatusBadge status={user.status || 'ACTIVE'} />
             </div>
           </div>
+          <form onSubmit={handleChangePassword} className="mt-8 border-t border-slate-200 pt-6 dark:border-slate-700">
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Change password</h3>
+            <div className="mt-4 space-y-3">
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={event => setCurrentPassword(event.target.value)}
+                placeholder="Current password"
+                required
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              />
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={event => setNewPassword(event.target.value)}
+                placeholder="New password (at least 8 characters)"
+                minLength={8}
+                maxLength={72}
+                required
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              />
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={confirmNewPassword}
+                onChange={event => setConfirmNewPassword(event.target.value)}
+                placeholder="Confirm new password"
+                minLength={8}
+                maxLength={72}
+                required
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              />
+              {passwordChangeMessage && (
+                <p role="status" className="text-sm text-slate-600 dark:text-slate-300">
+                  {passwordChangeMessage}
+                </p>
+              )}
+              <button
+                type="submit"
+                disabled={isChangingPassword}
+                className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isChangingPassword ? 'Changing password...' : 'Change password'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

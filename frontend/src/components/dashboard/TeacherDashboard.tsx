@@ -3,6 +3,7 @@ import {
   User,
   StudentResult,
   Question,
+  AiGenerationBatch,
   Difficulty,
   StudentQuery,
   ScheduledExam,
@@ -24,6 +25,8 @@ import {
 } from '../../constants';
 import { generateQuestionsWithAI } from '../../services/geminiService';
 import { dbService } from '../../services/dbService';
+import { CreatableSubjectCombobox } from '../common/CreatableSubjectCombobox';
+import { AiGenerationBatchCards } from './AiGenerationBatchCards';
 import { realtimeService } from '../../services/realtimeService';
 import {
   Modal,
@@ -243,6 +246,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [isExtractingSyllabus, setIsExtractingSyllabus] = useState(false);
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [aiDrafts, setAiDrafts] = useState<Question[]>([]);
+  const [aiGenerationBatches, setAiGenerationBatches] = useState<AiGenerationBatch[]>([]);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [editingDraftForm, setEditingDraftForm] = useState<Question | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -251,9 +255,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const refreshAiReviewData = useCallback(async () => {
     setIsLoadingAiData(true);
     try {
-      const [status, drafts] = await Promise.all([dbService.getAiStatus(), dbService.getAiDrafts()]);
+      const [status, drafts, batches] = await Promise.all([
+        dbService.getAiStatus(),
+        dbService.getAiDrafts(),
+        dbService.getAiGenerationBatches()
+      ]);
       setAiStatus(status);
       setAiDrafts(drafts);
+      setAiGenerationBatches(batches);
     } catch (err: any) {
       setAiStatus((current) => current ? { ...current, status: 'ERROR', message: err.message || 'Unable to load AI review data.' } : null);
     } finally {
@@ -461,6 +470,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const handleGenerateAIDrafts = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isGeneratingAI) return;
+    if (!Number.isInteger(aiCount) || aiCount < 1 || aiCount > 200) {
+      setAiError('Question count must be a whole number between 1 and 200.');
+      return;
+    }
     if (!extractedSyllabus?.syllabusId) {
       setAiError('Upload and extract a syllabus before generating questions.');
       return;
@@ -490,7 +503,19 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       });
     } catch (err: any) {
       setAiError(err.message || 'AI Question Generation is unavailable.');
-      setAiStatus((current) => current ? { ...current, status: 'ERROR', message: err.message || 'AI question generation failed.' } : current);
+      if (err.code === 'SYLLABUS_SUBJECT_MISMATCH') {
+        setAiStatus((current) => current ? {
+          ...current,
+          status: !current.configured
+            ? 'NOT_CONFIGURED'
+            : current.pendingReviewCount ? 'PENDING_REVIEW' : 'READY',
+          message: current.configured
+            ? 'AI Question Generation with Syllabus Upload is active.'
+            : current.message
+        } : current);
+      } else {
+        setAiStatus((current) => current ? { ...current, status: 'ERROR', message: err.message || 'AI question generation failed.' } : current);
+      }
     } finally {
       setIsGeneratingAI(false);
     }
@@ -742,6 +767,72 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       (q.topic || '').toLowerCase().includes(questionSearch.toLowerCase());
     return matchesSubject && matchesSearch;
   });
+  const isAiQuestion = (question: Question) =>
+    question.source === 'AI_GENERATED' || question.createdBy === 'AI';
+  const batchQuestionIds = new Set(aiGenerationBatches.flatMap((batch) => batch.questionIds || []));
+  const filteredManualQuestions = filteredQuestions.filter((question) => !isAiQuestion(question));
+  const filteredUnbatchedAiQuestions = filteredQuestions.filter(
+    (question) => isAiQuestion(question) && !batchQuestionIds.has(question.questionId || question.id)
+  );
+  const questionSearchTextByBatch = Object.fromEntries(
+    aiGenerationBatches.map((batch) => [
+      batch.generationId,
+      (batch.questionIds || [])
+        .map((questionId) => questions.find((question) => (question.questionId || question.id) === questionId)?.text || '')
+        .join(' ')
+    ])
+  );
+  const questionBankSubjects = Array.from(new Set([
+    ...questions.map((question) => question.subject || question.topic),
+    ...aiGenerationBatches.map((batch) => batch.subject)
+  ].filter(Boolean))).sort((left, right) => left.localeCompare(right));
+  const matchingAiBatchQuestionCount = aiGenerationBatches
+    .filter((batch) => {
+      if (selectedSubject !== 'ALL' && batch.subject.toLocaleLowerCase() !== selectedSubject.toLocaleLowerCase()) return false;
+      const term = questionSearch.trim().toLocaleLowerCase();
+      const metadataMatches = !term || [
+        batch.generationId,
+        batch.subject,
+        batch.course,
+        batch.semester,
+        batch.topic,
+        batch.sourceFileName,
+        batch.generatedByName,
+        batch.generatedBy,
+        batch.reviewStatus
+      ].some((value) => value.toLocaleLowerCase().includes(term));
+      const questionMatches = !term || (batch.questionIds || []).some((questionId) => {
+        const question = questions.find((item) => (item.questionId || item.id) === questionId);
+        return question?.text.toLocaleLowerCase().includes(term);
+      });
+      return metadataMatches || questionMatches;
+    })
+    .reduce((total, batch) => {
+      if (!questionSearch.trim() || [
+        batch.generationId,
+        batch.subject,
+        batch.course,
+        batch.semester,
+        batch.topic,
+        batch.sourceFileName,
+        batch.generatedByName,
+        batch.generatedBy,
+        batch.reviewStatus
+      ].some((value) => value.toLocaleLowerCase().includes(questionSearch.trim().toLocaleLowerCase()))) {
+        return total + (batch.questionIds?.length || batch.generatedCount);
+      }
+      return total + (batch.questionIds || []).filter((questionId) => {
+        const question = questions.find((item) => (item.questionId || item.id) === questionId);
+        return question?.text.toLocaleLowerCase().includes(questionSearch.trim().toLocaleLowerCase());
+      }).length;
+    }, 0);
+  const aiDraftGroupMap = aiDrafts.reduce<Record<string, { generationId: string; questions: Question[] }>>((groups, draft) => {
+      const generationId = draft.generationId || 'LEGACY';
+      groups[generationId] ||= { generationId, questions: [] };
+      groups[generationId].questions.push(draft);
+      return groups;
+    }, {});
+  const aiDraftGroups = Object.keys(aiDraftGroupMap).map((generationId) => aiDraftGroupMap[generationId]);
 
   // Compute Topic Mastery from real results
   const subjectStatsMap: Record<string, { totalPct: number; count: number }> = {};
@@ -1266,7 +1357,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Question Bank ({filteredQuestions.length})
+                Question Bank ({filteredManualQuestions.length + filteredUnbatchedAiQuestions.length + matchingAiBatchQuestionCount})
               </h2>
             <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
               <select
@@ -1275,7 +1366,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 className="h-12 px-3.5 text-[15px] bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200"
               >
                 <option value="ALL">All Subjects</option>
-                {SUBJECTS.map(sub => (
+                {questionBankSubjects.map(sub => (
                   <option key={sub} value={sub}>
                     {sub}
                   </option>
@@ -1301,9 +1392,37 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           </div>
 
-          {filteredQuestions.length === 0 ? (
+          <div className="p-5">
+            <AiGenerationBatchCards
+              batches={aiGenerationBatches}
+              search={questionSearch}
+              subject={selectedSubject}
+              questionSearchTextByBatch={questionSearchTextByBatch}
+              unbatchedQuestions={filteredUnbatchedAiQuestions}
+              onViewQuestion={setSelectedQuestionDetail}
+              onEditQuestion={openEditQuestionModal}
+              onDeleteQuestion={(question) => {
+                confirmAction({
+                  title: 'Delete Question',
+                  message: 'Are you sure you want to delete this question?',
+                  confirmLabel: 'Yes, Delete',
+                  cancelLabel: 'No',
+                  variant: 'danger',
+                  action: async () => {
+                    await onDeleteQuestion(question.questionId || question.id);
+                  }
+                });
+              }}
+              onReviewBatch={() => onNavigateTab('ai_generator')}
+              emptyMessage="No AI generation batches match these filters."
+            />
+          </div>
+
+          {filteredManualQuestions.length === 0 ? (
             <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No questions in the question bank.
+              {filteredQuestions.length > 0 || aiGenerationBatches.length > 0
+                ? 'No manual questions match these filters.'
+                : 'No questions in the question bank.'}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1322,7 +1441,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {filteredQuestions.map(q => (
+                  {filteredManualQuestions.map(q => (
                     <tr key={q.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
                       <td className="p-3.5 font-mono text-[14px] font-medium tabular-nums">
                         <button
@@ -1558,6 +1677,17 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   <p className="text-[13.5px] text-slate-600 dark:text-slate-300">
                     {extractedSyllabus.course} · {extractedSyllabus.semester} · {extractedSyllabus.subject}
                   </p>
+                  {extractedSyllabus.subjectCompatibility?.compatible === false && (
+                    <div
+                      role="alert"
+                      className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-[13.5px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+                    >
+                      <p className="font-semibold">Syllabus may not match the selected subject.</p>
+                      <p className="mt-1">Selected subject: {extractedSyllabus.subjectCompatibility.selectedSubject}</p>
+                      <p>Detected syllabus topic: {extractedSyllabus.subjectCompatibility.detectedTopic}</p>
+                      <p className="mt-1">Please select the matching subject or upload the correct syllabus.</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1566,24 +1696,19 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               onSubmit={handleGenerateAIDrafts}
               className="grid grid-cols-1 sm:grid-cols-6 gap-4 items-end"
             >
-              <div>
+              <div className="sm:col-span-3">
                 <label className="block text-[14px] font-medium text-slate-700 dark:text-slate-300 mb-1.5">
                   Subject
                 </label>
-                <select
+                <CreatableSubjectCombobox
                   value={aiTopic}
-                  onChange={e => {
-                    setAiTopic(e.target.value);
+                  onChange={value => {
+                    setAiTopic(value);
                     setExtractedSyllabus(null);
                   }}
-                  className="w-full h-12 px-3.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-[15px] text-slate-900 dark:text-white"
-                >
-                  {SUBJECTS.map(sub => (
-                    <option key={sub} value={sub}>
-                      {sub}
-                    </option>
-                  ))}
-                </select>
+                  onError={setAiError}
+                  required
+                />
               </div>
               <div>
                 <label className="block text-[14px] font-medium text-slate-700 dark:text-slate-300 mb-1.5">
@@ -1658,20 +1783,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </div>
               <div>
                 <label className="block text-[14px] font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                  Count (1–10)
+                  Count (1–200)
                 </label>
                 <input
                   type="number"
                   min={1}
-                  max={10}
+                  max={200}
                   value={aiCount}
                   onChange={e => setAiCount(Number(e.target.value))}
+                  required
                   className="w-full h-12 px-3.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-[15px] text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
               <button
                 type="submit"
-                disabled={isGeneratingAI || isExtractingSyllabus || !extractedSyllabus?.syllabusId}
+                disabled={isGeneratingAI || isExtractingSyllabus || !extractedSyllabus?.syllabusId || extractedSyllabus.subjectCompatibility?.compatible === false || !Number.isInteger(aiCount) || aiCount < 1 || aiCount > 200}
                 className="h-12 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[14.5px] font-medium inline-flex items-center justify-center"
               >
                 {isGeneratingAI ? 'Generating...' : 'Generate Drafts'}
@@ -1707,10 +1833,30 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </p>
             ) : (
               <div className="space-y-4">
-                {aiDrafts.map(draft => (
+                {aiDraftGroups.map(group => {
+                  const batch = aiGenerationBatches.find(item => item.generationId === group.generationId);
+                  return (
+                  <section key={group.generationId} className="space-y-3 rounded-xl border border-purple-200 p-4 dark:border-purple-900/60">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h4 className="text-[14px] font-semibold text-purple-800 dark:text-purple-300">
+                          {batch ? `Generation ${batch.generationId}` : 'Earlier AI generation'}
+                        </h4>
+                        {batch && (
+                          <p className="text-[12.5px] text-slate-500 dark:text-slate-400">
+                            {batch.subject} · {batch.course} · {batch.semester} · {batch.topic} · {batch.generatedCount} questions
+                          </p>
+                        )}
+                      </div>
+                      <span className="text-[12.5px] text-slate-500 dark:text-slate-400">
+                        {group.questions.length} pending review
+                      </span>
+                    </div>
+                    <div className="space-y-3.5">
+                    {group.questions.map(draft => (
                   <div
-                    key={draft.id}
-                    className="p-5 rounded-xl border border-slate-200 dark:border-slate-700 space-y-3.5"
+                    key={draft.questionId || draft.id}
+                    className="rounded-xl border border-slate-200 p-5 space-y-3.5 dark:border-slate-700"
                   >
                     {editingDraftId === draft.id && editingDraftForm ? (
                       <div className="space-y-3.5">
@@ -1818,7 +1964,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       </div>
                     )}
                   </div>
-                ))}
+                    ))}
+                    </div>
+                  </section>
+                  );
+                })}
               </div>
             )}
           </div>

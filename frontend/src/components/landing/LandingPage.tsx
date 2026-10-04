@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   ShieldCheck, Brain, ArrowRight, Cpu,
-  User as UserIcon, Lock as LockIcon, Eye, EyeOff, AlertCircle, X
+  User as UserIcon, Lock as LockIcon, Eye, EyeOff, AlertCircle, X, Mail, Copy
 } from 'lucide-react';
 import { User } from '../../types';
+import { COURSES, SEMESTERS } from '../../constants';
 import ExamXLogo from '../common/ExamXLogo';
 import { dbService } from '../../services/dbService';
 
@@ -22,15 +23,45 @@ const LandingPage: React.FC<Props> = ({
   darkMode 
 }) => {
   const [isSignInOpen, setIsSignInOpen] = useState(initialShowSignIn);
+  const [isSignUpOpen, setIsSignUpOpen] = useState(false);
   const [userId, setUserId] = useState('');
   const [password, setPassword] = useState('');
+  const [studentName, setStudentName] = useState('');
+  const [studentEmail, setStudentEmail] = useState('');
+  const [studentPhone, setStudentPhone] = useState('');
+  const [studentDob, setStudentDob] = useState('');
+  const [studentCourse, setStudentCourse] = useState('');
+  const [studentDepartment, setStudentDepartment] = useState('');
+  const [studentSemester, setStudentSemester] = useState('');
+  const [studentFacultyId, setStudentFacultyId] = useState('');
+  const [studentCredentials, setStudentCredentials] = useState<{
+    studentId: string;
+    initialPassword: string;
+  } | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const userIdInputRef = useRef<HTMLInputElement>(null);
+  const [copiedCredentialKey, setCopiedCredentialKey] = useState<'credentials' | null>(null);
+  const copiedFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetCopiedFeedback = () => {
+    if (copiedFeedbackTimeoutRef.current) {
+      clearTimeout(copiedFeedbackTimeoutRef.current);
+      copiedFeedbackTimeoutRef.current = null;
+    }
+    setCopiedCredentialKey(null);
+  };
+
+  useEffect(() => () => {
+    if (copiedFeedbackTimeoutRef.current) clearTimeout(copiedFeedbackTimeoutRef.current);
+  }, []);
 
   useEffect(() => {
     setIsSignInOpen(initialShowSignIn);
+    setIsSignUpOpen(false);
+    setStudentCredentials(null);
+    resetCopiedFeedback();
     setErrorMessage('');
     if (!initialShowSignIn) {
       setUserId('');
@@ -55,6 +86,9 @@ const LandingPage: React.FC<Props> = ({
     setUserId('');
     setPassword('');
     setShowPassword(false);
+    setIsSignUpOpen(false);
+    setStudentCredentials(null);
+    resetCopiedFeedback();
     setIsSignInOpen(true);
     if (onNavigate) {
       onNavigate('LOGIN');
@@ -67,6 +101,9 @@ const LandingPage: React.FC<Props> = ({
     setUserId('');
     setPassword('');
     setShowPassword(false);
+    setIsSignUpOpen(false);
+    setStudentCredentials(null);
+    resetCopiedFeedback();
     setIsSignInOpen(false);
     if (onNavigate) {
       onNavigate('LANDING');
@@ -113,14 +150,69 @@ const LandingPage: React.FC<Props> = ({
     }
   };
 
+  const handleStudentSignUpSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setErrorMessage('');
+    try {
+      const result = await dbService.signUpStudent({
+        name: studentName,
+        email: studentEmail,
+        phone: studentPhone,
+        dob: studentDob,
+        course: studentCourse,
+        department: studentDepartment,
+        semester: studentSemester,
+        facultyId: studentFacultyId
+      });
+      resetCopiedFeedback();
+      setStudentCredentials(result.credentials);
+      setIsSignUpOpen(false);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to create your student account.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopyCredentials = async () => {
+    if (!studentCredentials) return;
+    resetCopiedFeedback();
+    try {
+      await navigator.clipboard.writeText(
+        `Student ID: ${studentCredentials.studentId}\nInitial password: ${studentCredentials.initialPassword}`
+      );
+      setErrorMessage('');
+      if (copiedFeedbackTimeoutRef.current) clearTimeout(copiedFeedbackTimeoutRef.current);
+      setCopiedCredentialKey('credentials');
+      copiedFeedbackTimeoutRef.current = setTimeout(() => {
+        setCopiedCredentialKey(null);
+        copiedFeedbackTimeoutRef.current = null;
+      }, 1500);
+    } catch {
+      setErrorMessage('Unable to copy credentials. Please record them manually.');
+    }
+  };
+
+  const continueToSignIn = () => {
+    if (!studentCredentials) return;
+    setUserId(studentCredentials.studentId);
+    setPassword('');
+    resetCopiedFeedback();
+    setStudentCredentials(null);
+    setIsSignUpOpen(false);
+    setIsSignInOpen(true);
+    setErrorMessage('');
+  };
+
   return (
-    <div className={`min-h-screen ${darkMode ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'} overflow-x-hidden font-sans relative`}>
+    <div className={`${isSignUpOpen ? 'h-screen overflow-hidden' : 'min-h-screen'} ${darkMode ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'} overflow-x-hidden font-sans relative`}>
       {/* Background Gradients */}
       <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-blue-500/10 rounded-full blur-[120px] pointer-events-none animate-blob" />
       <div className="absolute bottom-0 left-0 w-[600px] h-[600px] bg-indigo-500/10 rounded-full blur-[120px] pointer-events-none animate-blob animation-delay-2000" />
 
       {/* Single Consistent Max-Width Content Container for Top Header and Hero */}
-      <div className="w-full max-w-[1440px] mx-auto px-6 sm:px-10 min-h-screen flex flex-col relative z-10">
+      <div className={`w-full max-w-[1440px] mx-auto px-6 sm:px-10 ${isSignUpOpen ? 'h-full min-h-0' : 'min-h-screen'} flex flex-col relative z-10`}>
         {/* Top Header: ExamX Assessment Logo (Left) and Sign In (Right) */}
         <header className="w-full pt-6 sm:pt-8 pb-2 flex justify-between items-center bg-transparent border-0 shadow-none z-30 shrink-0">
           <div 
@@ -146,8 +238,8 @@ const LandingPage: React.FC<Props> = ({
         </header>
 
         {/* Main Two-Column Hero Layout (Left: Existing Home Content; Right: Live Session Preview or Sign-In Panel) */}
-        <main className="w-full flex-1 py-10 lg:py-14 flex items-center">
-          <div className="w-full grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+        <main className={`w-full flex-1 ${isSignUpOpen ? 'min-h-0 py-3 lg:py-4' : 'py-10 lg:py-14'} flex items-center`}>
+          <div className={`w-full grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center ${isSignUpOpen ? 'min-h-0' : ''}`}>
             
             {/* LEFT SIDE: Existing ExamX Home Content */}
             <div className="lg:col-span-6 xl:col-span-7 animate-slide-up">
@@ -181,10 +273,10 @@ const LandingPage: React.FC<Props> = ({
             </div>
 
             {/* RIGHT SIDE: State 1 (Live Session Card) OR State 2 (Sign-In Panel) */}
-            <div className="lg:col-span-6 xl:col-span-5 flex justify-center lg:justify-end">
+            <div className={`lg:col-span-6 xl:col-span-5 flex justify-center lg:justify-end ${isSignUpOpen ? 'max-lg:fixed max-lg:inset-x-6 max-lg:top-20 max-lg:z-40 max-lg:flex max-lg:justify-center' : ''}`}>
               {isSignInOpen ? (
                 /* STATE 2 — Right-Side Sign-In Panel with Top-Right Close X Control */
-                <div className="w-full max-w-md bg-white dark:bg-slate-800 rounded-3xl p-7 sm:p-9 shadow-2xl border border-slate-200/90 dark:border-slate-700 animate-fade-in my-auto relative">
+                <div className={`w-full max-w-md bg-white dark:bg-slate-800 rounded-3xl p-7 sm:p-9 shadow-2xl border border-slate-200/90 dark:border-slate-700 animate-fade-in my-auto relative ${isSignUpOpen ? 'flex max-h-[calc(100dvh-7rem)] min-h-0 flex-col overflow-hidden' : ''}`}>
                   {/* Close X control at top-right of Sign-In panel */}
                   <button
                     type="button"
@@ -197,19 +289,194 @@ const LandingPage: React.FC<Props> = ({
                   </button>
 
                   <div className="mb-6 pr-8">
-                    <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">Sign in</h2>
+                    <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+                      {studentCredentials ? 'Account created' : isSignUpOpen ? 'Student sign up' : 'Sign in'}
+                    </h2>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                      Enter your ID and password.
+                      {studentCredentials
+                        ? 'Save these credentials now. The initial password will only be shown once.'
+                        : isSignUpOpen
+                        ? 'Create a student account to access ExamX.'
+                        : 'Enter your ID and password.'}
                     </p>
                   </div>
 
-                  {errorMessage && (
-                    <div className="mb-5 p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-center gap-2.5 text-xs font-semibold text-red-600 dark:text-red-400 animate-fade-in">
-                      <AlertCircle size={16} className="shrink-0 text-red-500" />
-                      <span>{errorMessage}</span>
-                    </div>
-                  )}
+                  <div className={isSignUpOpen ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1' : ''}>
+                    {errorMessage && (
+                      <div className="mb-5 p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-center gap-2.5 text-xs font-semibold text-red-600 dark:text-red-400 animate-fade-in">
+                        <AlertCircle size={16} className="shrink-0 text-red-500" />
+                        <span>{errorMessage}</span>
+                      </div>
+                    )}
 
+                    {studentCredentials ? (
+                    <div className="space-y-4">
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+                        <p className="font-semibold">Keep these credentials safe.</p>
+                        <p className="mt-1">You can change your password after signing in.</p>
+                      </div>
+                      <div className="space-y-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
+                        <div>
+                          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">STUDENT ID</p>
+                          <p className="mt-1 font-mono font-semibold text-slate-900 dark:text-white">{studentCredentials.studentId}</p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">INITIAL PASSWORD</p>
+                          <p className="mt-1 break-all font-mono font-semibold text-slate-900 dark:text-white">{studentCredentials.initialPassword}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCopyCredentials}
+                        className="w-full rounded-xl border border-slate-200 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-700/50 inline-flex items-center justify-center gap-2"
+                      >
+                        <Copy size={16} /> {copiedCredentialKey === 'credentials' ? 'Copied' : 'Copy credentials'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={continueToSignIn}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3.5 rounded-xl font-bold text-sm shadow-md shadow-blue-500/20 transition-all"
+                      >
+                        Continue to sign in
+                      </button>
+                    </div>
+                    ) : isSignUpOpen ? (
+                    <form onSubmit={handleStudentSignUpSubmit} className="space-y-3.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                          FULL NAME
+                        </label>
+                        <input
+                          type="text"
+                          autoComplete="name"
+                          value={studentName}
+                          onChange={event => setStudentName(event.target.value)}
+                          maxLength={120}
+                          required
+                          className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 outline-none focus:border-blue-600 text-slate-900 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                          EMAIL
+                        </label>
+                        <div className="relative">
+                          <Mail size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="email"
+                            autoComplete="email"
+                            value={studentEmail}
+                            onChange={event => setStudentEmail(event.target.value)}
+                            maxLength={254}
+                            required
+                            className="w-full pl-10 pr-4 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 outline-none focus:border-blue-600 text-slate-900 dark:text-white"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                            PHONE
+                          </label>
+                          <input
+                            type="tel"
+                            autoComplete="tel"
+                            value={studentPhone}
+                            onChange={event => setStudentPhone(event.target.value)}
+                            maxLength={20}
+                            required
+                            className="w-full px-3 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 outline-none focus:border-blue-600 text-slate-900 dark:text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                            DATE OF BIRTH
+                          </label>
+                          <input
+                            type="date"
+                            autoComplete="bday"
+                            value={studentDob}
+                            onChange={event => setStudentDob(event.target.value)}
+                            max={new Date().toISOString().slice(0, 10)}
+                            required
+                            className="w-full px-3 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 outline-none focus:border-blue-600 text-slate-900 dark:text-white"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                            COURSE
+                          </label>
+                          <select
+                            value={studentCourse}
+                            onChange={event => setStudentCourse(event.target.value)}
+                            required
+                            className="w-full px-3 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
+                          >
+                            <option value="">Select course</option>
+                            {COURSES.map(course => <option key={course} value={course}>{course}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                            SEMESTER
+                          </label>
+                          <select
+                            value={studentSemester}
+                            onChange={event => setStudentSemester(event.target.value)}
+                            required
+                            className="w-full px-3 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
+                          >
+                            <option value="">Select semester</option>
+                            {SEMESTERS.map(semester => <option key={semester} value={semester}>{semester}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                          DEPARTMENT
+                        </label>
+                        <input
+                          type="text"
+                          value={studentDepartment}
+                          onChange={event => setStudentDepartment(event.target.value)}
+                          maxLength={120}
+                          required
+                          className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 outline-none focus:border-blue-600 text-slate-900 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                          FACULTY ID
+                        </label>
+                        <input
+                          type="text"
+                          value={studentFacultyId}
+                          onChange={event => setStudentFacultyId(event.target.value)}
+                          pattern="1251[0-9]{4}"
+                          maxLength={8}
+                          placeholder="1251XXXX"
+                          required
+                          className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl text-sm border border-slate-200 dark:border-slate-700 outline-none focus:border-blue-600 text-slate-900 dark:text-white"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3.5 rounded-xl font-bold text-sm shadow-md shadow-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-2"
+                      >
+                        {loading ? 'Creating account...' : 'Create student account'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setIsSignUpOpen(false); setErrorMessage(''); }}
+                        className="w-full text-sm font-semibold text-blue-700 hover:underline dark:text-blue-300"
+                      >
+                        Already have an account? Sign in
+                      </button>
+                    </form>
+                    ) : (
                   <form onSubmit={handleSignInSubmit} className="space-y-4">
                     <div>
                       <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
@@ -261,7 +528,21 @@ const LandingPage: React.FC<Props> = ({
                     >
                       {loading ? 'Signing in...' : 'Sign in'}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsSignUpOpen(true);
+                        setStudentCredentials(null);
+                        resetCopiedFeedback();
+                        setErrorMessage('');
+                      }}
+                      className="w-full text-sm font-semibold text-blue-700 hover:underline dark:text-blue-300"
+                    >
+                      Student? Create an account
+                    </button>
                   </form>
+                  )}
+                  </div>
                 </div>
               ) : (
                 /* STATE 1 — Normal Home Interactive Card */

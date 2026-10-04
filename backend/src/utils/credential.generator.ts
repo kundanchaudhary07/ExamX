@@ -1,4 +1,5 @@
 import { User } from '../models/User';
+import { Sequence } from '../models/Sequence';
 
 export const TEACHER_ID_REGEX = /^1251[0-9]{4}$/;
 export const STUDENT_ID_REGEX = /^1261[0-9]{4}$/;
@@ -47,6 +48,27 @@ export function extractBirthYear(dobOrYear?: number | string): number {
   }
 
   return parseInt(yearCandidate, 10);
+}
+
+export function validateDateOfBirth(value: unknown): { dob: string; year: number } {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const err: any = new Error('Enter a valid date of birth.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== value ||
+    date > new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`)
+  ) {
+    const err: any = new Error('Enter a valid date of birth that is not in the future.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  return { dob: value, year: date.getUTCFullYear() };
 }
 
 /**
@@ -116,15 +138,73 @@ export async function generateNextStudentId(): Promise<string> {
     }
   }
 
-  let candidateId = `1261${String(nextSeq).padStart(4, '0')}`;
-  // Collision guard
-  while (await User.exists({ userId: candidateId })) {
+  const sequence = await Sequence.findById('student').lean();
+  nextSeq = Math.max(nextSeq, (sequence?.value || 0) + 1);
+  while (nextSeq <= 9999 && await User.exists({
+    userId: `1261${String(nextSeq).padStart(4, '0')}`
+  })) {
     nextSeq++;
-    if (nextSeq > 9999) {
-      throw new Error('Student ID sequence capacity (12619999) exhausted');
+  }
+  if (nextSeq > 9999) {
+    throw new Error('Student ID sequence capacity (12619999) exhausted');
+  }
+  return `1261${String(nextSeq).padStart(4, '0')}`;
+}
+
+async function allocateNextStudentId(): Promise<string> {
+  const latest = await User.find({ userId: { $regex: '^1261[0-9]{4}$' } })
+    .sort({ userId: -1 })
+    .limit(1)
+    .lean();
+
+  let highestSeq = 0;
+  if (latest.length > 0 && latest[0]?.userId) {
+    const currentSeq = parseInt(latest[0].userId.slice(4), 10);
+    if (!isNaN(currentSeq)) {
+      highestSeq = currentSeq;
     }
-    candidateId = `1261${String(nextSeq).padStart(4, '0')}`;
   }
 
-  return candidateId;
+  try {
+    await Sequence.updateOne(
+      { _id: 'student' },
+      { $max: { value: highestSeq } },
+      { upsert: true }
+    );
+  } catch (error: any) {
+    if (error?.code !== 11000) throw error;
+  }
+
+  for (;;) {
+    const sequence = await Sequence.findOneAndUpdate(
+      { _id: 'student' },
+      { $inc: { value: 1 } },
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+    );
+    if (!sequence || sequence.value > 9999) {
+      throw new Error('Student ID sequence capacity (12619999) exhausted');
+    }
+
+    const candidateId = `1261${String(sequence.value).padStart(4, '0')}`;
+    if (!(await User.exists({ userId: candidateId }))) return candidateId;
+  }
+}
+
+export async function createStudentWithGeneratedId<T>(
+  create: (studentId: string) => Promise<T>
+): Promise<T> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const studentId = await allocateNextStudentId();
+    try {
+      return await create(studentId);
+    } catch (error: any) {
+      const isUserIdCollision =
+        error?.code === 11000 &&
+        (error?.keyPattern?.userId === 1 ||
+          error?.keyValue?.userId ||
+          String(error?.message || '').includes('userId_1'));
+      if (!isUserIdCollision || attempt === 4) throw error;
+    }
+  }
+  throw new Error('Unable to allocate a unique student ID.');
 }

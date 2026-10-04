@@ -10,6 +10,7 @@ import { Question } from '../src/models/Question';
 import { Syllabus } from '../src/models/Syllabus';
 import { JwtUserPayload } from '../src/types/auth.types';
 import { QuestionService } from '../src/services/question.service';
+import { checkSyllabusSubjectCompatibility } from '../src/utils/syllabusSubjectCompatibility';
 
 const syllabusText =
   'UNIT 1: Data structures include arrays and linked lists. Arrays use contiguous memory locations. ' +
@@ -62,6 +63,15 @@ const noWait = {
   random: () => 0
 };
 
+const mediumLengthDbmsSyllabus = Array.from(
+  { length: 13 },
+  () =>
+    'UNIT I: Database management systems organize relational information within tables. Tables contain records and attributes. ' +
+    'Primary keys alongside foreign keys connect related records. SQL queries retrieve and update information. ' +
+    'Normalization reduces redundancy. Transactions preserve consistency. Concurrency control coordinates practitioners. ' +
+    'Recovery restores data after failures.'
+).join(' ');
+
 async function run(): Promise<void> {
   const originalProvider = process.env.AI_PROVIDER;
   const originalGroqKey = process.env.GROQ_API_KEY;
@@ -74,6 +84,89 @@ async function run(): Promise<void> {
   process.env.GROQ_API_KEY = 'test-only-groq-placeholder';
 
   try {
+    {
+      assert.equal(
+        checkSyllabusSubjectCompatibility(
+          'Artificial Intelligence',
+          'UNIT I: Artificial Intelligence covers intelligent agents and knowledge representation.'
+        ).compatible,
+        true,
+        'An AI syllabus is accepted for the AI subject'
+      );
+      assert.equal(
+        checkSyllabusSubjectCompatibility(
+          'Database Management Systems',
+          'DBMS introduces SQL, relational databases, normalization, and transactions.'
+        ).compatible,
+        true,
+        'DBMS abbreviations and terminology are accepted for Database Management Systems'
+      );
+      assert.equal(
+        checkSyllabusSubjectCompatibility(
+          'Operating Systems',
+          'Operating System Concepts: processes, threads, process scheduling, memory management, and file systems.'
+        ).compatible,
+        true,
+        'An Operating Systems syllabus is accepted'
+      );
+      assert.deepEqual(
+        checkSyllabusSubjectCompatibility(
+          'Artificial Intelligence',
+          'INT363: CLOUD MICROSERVICES. Cloud computing, microservices, Docker, Kubernetes, cloud-native deployments, and AWS.'
+        ),
+        {
+          compatible: false,
+          selectedSubject: 'Artificial Intelligence',
+          detectedTopic: 'Cloud Microservices'
+        },
+        'A strong cloud/microservices syllabus conflicts with Artificial Intelligence'
+      );
+      assert.equal(
+        checkSyllabusSubjectCompatibility(
+          'Artificial Intelligence',
+          'Machine Learning studies neural networks, knowledge representation, natural language processing, and computer vision.'
+        ).compatible,
+        true,
+        'AI-related terminology is accepted without the exact subject phrase'
+      );
+      assert.equal(
+        checkSyllabusSubjectCompatibility(
+          'Database Management Systems',
+          'DBMS: relational databases use SQL; normalization and primary keys organize records.'
+        ).compatible,
+        true,
+        'DBMS shorthand is accepted'
+      );
+      assert.equal(
+        checkSyllabusSubjectCompatibility(
+          'Artificial Intelligence',
+          'The syllabus describes foundational concepts and learning outcomes for the course.'
+        ).compatible,
+        true,
+        'Ambiguous syllabus content is not blocked'
+      );
+
+      let providerCalls = 0;
+      const client = groqClient(async () => {
+        providerCalls++;
+        return { choices: [{ message: { content: JSON.stringify(generatedResponse()) } }] };
+      });
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          subject: 'Artificial Intelligence',
+          topic: 'all',
+          syllabusText: 'INT363: CLOUD MICROSERVICES. Cloud computing, microservices, Docker, Kubernetes, cloud-native deployments, and AWS.'
+        }, client, noWait),
+        (error: any) =>
+          error.statusCode === 422 &&
+          error.code === 'SYLLABUS_SUBJECT_MISMATCH' &&
+          /Selected subject: Artificial Intelligence/.test(error.message) &&
+          /Detected syllabus topic: Cloud Microservices/.test(error.message)
+      );
+      assert.equal(providerCalls, 0, 'A high-confidence mismatch is rejected before the Groq request');
+    }
+
     {
       delete process.env.GROQ_API_KEY;
       assert.equal(AiQuestionService.getStatus().configured, false);
@@ -119,6 +212,86 @@ async function run(): Promise<void> {
         (error: any) => error.code === 'AI_INVALID_RESPONSE' && error.statusCode === 502
       );
       assert.equal(calls, 1, 'Malformed schema responses are not retried');
+    }
+
+    {
+      const mediumLengthWords = mediumLengthDbmsSyllabus.split(/\s+/).filter(Boolean).length;
+      assert(mediumLengthWords >= 500 && mediumLengthWords <= 600);
+      assert(mediumLengthDbmsSyllabus.length >= 4000);
+
+      const allTopicParams = {
+        ...generationParams,
+        subject: 'Database Management Systems',
+        topic: 'all',
+        course: 'B.Tech CS',
+        semester: 'Semester 2',
+        count: 20,
+        syllabusText: mediumLengthDbmsSyllabus
+      };
+      let capturedRequest: any;
+      let providerCalls = 0;
+      const response = {
+        questions: Array.from({ length: allTopicParams.count }, (_, index) => ({
+          ...generatedResponse().questions[0],
+          questionText: `Which syllabus concept is covered by database question ${index + 1}?`,
+          subject: allTopicParams.subject,
+          course: allTopicParams.course,
+          semester: allTopicParams.semester,
+          topic: 'all',
+          syllabusUnit: 'UNIT I',
+          syllabusTopic: 'Database management systems',
+          sourceReference: 'Primary keys alongside foreign keys connect related records.'
+        }))
+      };
+      const client = groqClient(async (input) => {
+        providerCalls++;
+        capturedRequest = input;
+        return { choices: [{ message: { content: JSON.stringify(response) } }] };
+      });
+      const result = await AiQuestionService.generateQuestionsForReview(allTopicParams, client, noWait);
+
+      assert.equal(providerCalls, 1, 'A 500+ word syllabus reaches the configured provider');
+      assert.equal(capturedRequest.model, 'openai/gpt-oss-120b');
+      assert.match(capturedRequest.messages[1].content, /Generate 20 rigorous/);
+      assert.match(capturedRequest.messages[1].content, /across all relevant units and topics/);
+      assert.doesNotMatch(capturedRequest.messages[1].content, /focusing on topic\/unit "all"/i);
+      assert(capturedRequest.messages[1].content.includes(mediumLengthDbmsSyllabus));
+      assert.equal(result.drafts.length, 20);
+      assert(result.drafts.every(draft => draft.topic === 'all'));
+      assert(result.drafts.every(draft => draft.reviewStatus === 'PENDING_TEACHER_REVIEW'));
+    }
+
+    {
+      let calls = 0;
+      const client = groqClient(async () => {
+        calls++;
+        return { choices: [{ message: { content: JSON.stringify({ questions: [] }) } }] };
+      });
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview(generationParams, client, noWait),
+        (error: any) =>
+          error.code === 'AI_INVALID_RESPONSE' &&
+          error.statusCode === 502 &&
+          /GROQ returned no questions/.test(error.message) &&
+          !/does not provide enough information/.test(error.message)
+      );
+      assert.equal(calls, 1);
+    }
+
+    for (const invalidText of ['', ' \n\t  ']) {
+      let calls = 0;
+      const client = groqClient(async () => {
+        calls++;
+        return { choices: [{ message: { content: JSON.stringify(generatedResponse()) } }] };
+      });
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          syllabusText: invalidText
+        }, client, noWait),
+        (error: any) => error.code === 'INSUFFICIENT_SYLLABUS_CONTEXT'
+      );
+      assert.equal(calls, 0, 'Empty or whitespace-only syllabus must not reach the provider');
     }
 
     for (const status of [401, 403]) {

@@ -42,6 +42,7 @@ export async function startServer() {
 
     // Initialize Express Application with API routes
     const app = createApp();
+    const httpServer = http.createServer(app);
     const portArgIndex = process.argv.indexOf('--port');
     const port =
       portArgIndex !== -1 && process.argv[portArgIndex + 1]
@@ -78,7 +79,10 @@ export async function startServer() {
         const { createServer: createViteServer } = await import('vite');
         const vite = await createViteServer({
           root: frontendDir,
-          server: { middlewareMode: true, hmr: false },
+          server: {
+            middlewareMode: true,
+            hmr: isProductionBuild ? false : { server: httpServer }
+          },
           appType: 'spa'
         });
         app.use(vite.middlewares);
@@ -94,8 +98,7 @@ export async function startServer() {
       logger.info(`Static production assets served from ${distPath}`);
     }
 
-    // Create HTTP Server & attach Authenticated Socket.IO Real-Time Layer
-    const httpServer = http.createServer(app);
+    // Attach Socket.IO and Vite HMR to the same HTTP server.
     initSocketServer(httpServer);
 
     httpServer.listen(Number(port), '0.0.0.0', () => {

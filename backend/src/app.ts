@@ -14,6 +14,7 @@ import proctoringRoutes from './routes/proctoring.routes';
 import communicationRoutes from './routes/communication.routes';
 import auditRoutes from './routes/audit.routes';
 import dashboardRoutes from './routes/dashboard.routes';
+import subjectRoutes from './routes/subject.routes';
 import { errorHandler } from './middleware/error.middleware';
 import { notFoundHandler } from './middleware/notFound.middleware';
 import { isDatabaseConnected, connectDatabase } from './config/database';
@@ -111,6 +112,7 @@ export function createApp(): Application {
   app.use('/api/communication', communicationRoutes);
   app.use('/api/audit-logs', auditRoutes);
   app.use('/api/dashboard', dashboardRoutes);
+  app.use('/api/subjects', subjectRoutes);
 
   // Unmatched API Route 404 Handler
   app.use('/api', notFoundHandler);

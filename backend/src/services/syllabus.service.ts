@@ -3,6 +3,11 @@ import { JwtUserPayload } from '../types/auth.types';
 import { Syllabus, ISyllabusDocument } from '../models/Syllabus';
 import { ExamService } from './exam.service';
 import { UploadedSyllabusInput, validateAndExtractSyllabus } from '../utils/syllabusExtractor';
+import { SubjectService } from './subject.service';
+import {
+  checkSyllabusSubjectCompatibility,
+  SyllabusSubjectCompatibility
+} from '../utils/syllabusSubjectCompatibility';
 
 export interface SyllabusMetadata {
   syllabusId: string;
@@ -16,12 +21,16 @@ export interface SyllabusMetadata {
   uploadedAt: Date;
 }
 
+export interface SyllabusUploadMetadata extends SyllabusMetadata {
+  subjectCompatibility: SyllabusSubjectCompatibility;
+}
+
 export class SyllabusService {
   static async upload(
     file: UploadedSyllabusInput | undefined | null,
     metadata: { course?: string; semester?: string; subject?: string },
     user: JwtUserPayload
-  ): Promise<SyllabusMetadata> {
+  ): Promise<SyllabusUploadMetadata> {
     if (user.role !== 'TEACHER' && user.role !== 'ADMIN') {
       const err: any = new Error('Only teachers and administrators may upload syllabi.');
       err.statusCode = 403;
@@ -43,13 +52,14 @@ export class SyllabusService {
       err.code = 'INSUFFICIENT_SYLLABUS_CONTEXT';
       throw err;
     }
+    const normalizedSubject = await SubjectService.ensure(subject, user.userId);
     const syllabus = await Syllabus.create({
       syllabusId: `SYL-${randomUUID()}`,
       uploadedBy: user.userId,
       uploadedByRole: user.role,
       course: ExamService.normalizeCourse(metadata.course),
       semester: ExamService.normalizeSemester(metadata.semester),
-      subject,
+      subject: normalizedSubject,
       fileName: extracted.fileName,
       fileType: extracted.fileType,
       charCount: extracted.charCount,
@@ -57,7 +67,10 @@ export class SyllabusService {
       extractedText: extracted.text
     });
 
-    return this.toMetadata(syllabus);
+    return {
+      ...this.toMetadata(syllabus),
+      subjectCompatibility: checkSyllabusSubjectCompatibility(normalizedSubject, extracted.text)
+    };
   }
 
   static async getForUser(syllabusId: string, user: JwtUserPayload): Promise<ISyllabusDocument> {

@@ -62,8 +62,8 @@ export interface KpiCardProps {
 export function getKpiPrimaryValueClass(value: string | number): string {
   const isLongValue = String(value).trim().length > 12;
   const size = isLongValue
-    ? 'text-[19px] sm:text-[20px] lg:text-[21px]'
-    : 'text-[20px] sm:text-[22px] lg:text-[24px]';
+    ? 'text-[17px] sm:text-[18px] lg:text-[19px]'
+    : 'text-[19px] sm:text-[20px] lg:text-[21px]';
   return `${size} font-semibold leading-[1.15] break-words line-clamp-2`;
 }
 
@@ -144,6 +144,8 @@ export function getStatusBadgeClasses(status?: string): string {
     case 'IN_PROGRESS':
       return 'bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border-blue-200 dark:border-blue-800';
     case 'PENDING':
+    case 'PENDING_REVIEW':
+    case 'PARTIALLY_REVIEWED':
     case 'UNDER_REVIEW':
     case 'DRAFT':
     case 'WARNED':
@@ -154,6 +156,7 @@ export function getStatusBadgeClasses(status?: string): string {
     case 'BLOCKED':
     case 'SUSPENDED':
     case 'REJECTED':
+    case 'DISCARDED':
     case 'TERMINATED':
     case 'CRITICAL':
     case 'HIGH':

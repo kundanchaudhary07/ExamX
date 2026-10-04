@@ -6,10 +6,16 @@ import { QuestionService } from './question.service';
 import { ExamService } from './exam.service';
 import { SyllabusService } from './syllabus.service';
 import { AuditService } from './audit.service';
+import { AiGenerationBatchService } from './ai-generation-batch.service';
+import { SubjectService } from './subject.service';
 import {
   UploadedSyllabusInput,
   getMaxSyllabusFileSizeBytes
 } from '../utils/syllabusExtractor';
+import {
+  checkSyllabusSubjectCompatibility,
+  createSyllabusSubjectMismatchError
+} from '../utils/syllabusSubjectCompatibility';
 import { logger } from '../utils/logger';
 
 export interface IGeneratedQuestionDraft {
@@ -78,6 +84,17 @@ type GenerationProviderResponse = {
   text?: string;
   choices?: Array<{ message?: { content?: string | null } }>;
 };
+
+export function validateQuestionCount(value: unknown): number {
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 1 || count > 200) {
+    const err: any = new Error('Question count must be an integer between 1 and 200.');
+    err.statusCode = 400;
+    err.code = 'AI_INVALID_REQUEST';
+    throw err;
+  }
+  return count;
+}
 
 const GROQ_MODEL = 'openai/gpt-oss-120b';
 const GEMINI_MODEL = 'gemini-3.8-flash';
@@ -373,6 +390,7 @@ export class AiQuestionService {
 
     const syllabusText = (params.syllabusText || '').trim();
     const topicOrUnit = (params.topic || params.unit || '').trim();
+    const isAllTopics = topicOrUnit.toLocaleLowerCase() === 'all';
     const subject = (params.subject || '').trim();
 
     if (!params.syllabusId || syllabusText.length < 80) {
@@ -387,16 +405,14 @@ export class AiQuestionService {
       err.statusCode = 400;
       throw err;
     }
+    const subjectCompatibility = checkSyllabusSubjectCompatibility(subject, syllabusText);
+    if (!subjectCompatibility.compatible) {
+      throw createSyllabusSubjectMismatchError(subjectCompatibility);
+    }
 
     const resolvedSubject = subject;
     const resolvedTopic = topicOrUnit || resolvedSubject;
-    const count = Number(params.count);
-    if (!Number.isInteger(count) || count < 1 || count > 10) {
-      const err: any = new Error('Question count must be an integer between 1 and 10.');
-      err.statusCode = 400;
-      err.code = 'AI_INVALID_REQUEST';
-      throw err;
-    }
+    const count = validateQuestionCount(params.count);
     const rawDiff = String(params.difficulty || 'MEDIUM').toUpperCase();
     if (!['EASY', 'MEDIUM', 'HARD', 'MIXED'].includes(rawDiff)) {
       const err: any = new Error('Difficulty must be EASY, MEDIUM, HARD, or MIXED.');
@@ -475,9 +491,12 @@ Rules:
 7. Do not introduce outside concepts or use general knowledge to fill missing information.
 8. If the syllabus does not contain enough information, return no questions; do not invent content.`;
 
-      const prompt = `Generate ${count} rigorous university-level multiple-choice questions (MCQs) for the subject "${resolvedSubject}"${
-        topicOrUnit ? ` focusing on topic/unit "${topicOrUnit}"` : ''
-      }. Use exact metadata values subject="${resolvedSubject}", course="${safeCourse}", semester="${safeSemester}", and topic="${resolvedTopic}". ${difficultyInstruction} Each question must have exactly 4 distinct options with IDs "A", "B", "C", and "D", a single valid correctOption ("A", "B", "C", or "D"), difficulty ("EASY", "MEDIUM", or "HARD"), a syllabus unit and syllabus topic supported by the supplied content, a sourceReference copied exactly from the syllabus, marks (${marks}), and a concise academic explanation. If the syllabus is insufficient, return an empty array. Do not invent any value to fill a required field.${syllabusContext}`;
+      const scopeInstruction = isAllTopics
+        ? 'Generate across all relevant units and topics present in the supplied syllabus. Do not interpret "all" as a literal syllabus topic. For the topic metadata field only, use the exact value "all"; syllabusTopic must name an actual topic present in the content.'
+        : topicOrUnit
+          ? `Focus on topic/unit "${topicOrUnit}".`
+          : '';
+      const prompt = `Generate ${count} rigorous university-level multiple-choice questions (MCQs) for the subject "${resolvedSubject}". ${scopeInstruction} Use exact metadata values subject="${resolvedSubject}", course="${safeCourse}", semester="${safeSemester}", and topic="${resolvedTopic}". ${difficultyInstruction} Each question must have exactly 4 distinct options with IDs "A", "B", "C", and "D", a single valid correctOption ("A", "B", "C", or "D"), difficulty ("EASY", "MEDIUM", or "HARD"), a syllabus unit and syllabus topic supported by the supplied content, a sourceReference copied exactly from the syllabus, marks (${marks}), and a concise academic explanation. If the syllabus is insufficient, return an empty array. Do not invent any value to fill a required field.${syllabusContext}`;
 
       const response = await callProviderWithTransientRetries<GenerationProviderResponse>(() => {
         if (provider === 'GEMINI') {
@@ -541,7 +560,7 @@ Rules:
             }
           },
           temperature: 0,
-          max_completion_tokens: 8192
+          max_completion_tokens: Math.min(49152, Math.max(8192, count * 256))
         });
       }, retryHooks, modelName, provider);
 
@@ -574,9 +593,9 @@ Rules:
         throw err;
       }
       if (parsed.length === 0) {
-        const err: any = new Error('The uploaded syllabus does not provide enough information for this request.');
-        err.statusCode = 422;
-        err.code = 'INSUFFICIENT_SYLLABUS_CONTEXT';
+        const err: any = new Error(`${provider} returned no questions for the supplied syllabus and request.`);
+        err.statusCode = 502;
+        err.code = 'AI_INVALID_RESPONSE';
         throw err;
       }
       if (parsed.length !== count) {
@@ -671,7 +690,7 @@ Rules:
           Number(item.marks) !== marks ||
           !sourceText.includes(normalizedReference) ||
           !sourceText.includes(normalizedUnit) ||
-          !sourceText.includes(normalizedTopic)
+          (!isAllTopics && !sourceText.includes(normalizedTopic))
         ) {
           const err: any = new Error(`${provider} question ${idx + 1} has invalid marks or an unsupported source reference.`);
           err.statusCode = 502;
@@ -797,7 +816,7 @@ Rules:
     const syllabus = await SyllabusService.getForUser(params.syllabusId, user);
     const course = params.course ? ExamService.normalizeCourse(params.course) : syllabus.course;
     const semester = params.semester ? ExamService.normalizeSemester(params.semester) : syllabus.semester;
-    const subject = params.subject?.trim() || syllabus.subject;
+    const subject = await SubjectService.ensure(params.subject?.trim() || syllabus.subject, user.userId);
     if (
       course !== syllabus.course || semester !== syllabus.semester ||
       subject.toLowerCase() !== syllabus.subject.toLowerCase()
@@ -817,7 +836,23 @@ Rules:
       syllabusText: syllabus.extractedText,
       syllabusFileName: syllabus.fileName
     }, providerClient, retryHooks);
-    const savedDrafts = await QuestionService.createAiDrafts(drafts, user);
+    const batch = await AiGenerationBatchService.create({
+      generatedBy: user.userId,
+      generatedByName: user.name,
+      subject,
+      course: syllabus.course,
+      semester: syllabus.semester,
+      topic: params.topic?.trim() || params.unit?.trim() || subject,
+      difficulty: String(params.difficulty || 'MEDIUM').toUpperCase() as 'EASY' | 'MEDIUM' | 'HARD' | 'MIXED',
+      marksPerQuestion: Number(params.marks),
+      requestedCount: Number(params.count),
+      generatedCount: drafts.length,
+      syllabusId: syllabus.syllabusId,
+      sourceFileName: syllabus.fileName,
+      provider,
+      aiModel: providerModel(provider)
+    });
+    const savedDrafts = await QuestionService.createAiDrafts(drafts, user, batch.generationId);
     await AuditService.record({
       actorId: user.userId,
       actorName: user.name,
@@ -826,6 +861,7 @@ Rules:
       targetType: 'SYLLABUS',
       targetId: syllabus.syllabusId,
       details: JSON.stringify({
+        generationId: batch.generationId,
         provider,
         model: providerModel(provider),
         teacherUserId: user.userId,
@@ -838,6 +874,7 @@ Rules:
     return {
       syllabus: SyllabusService.toMetadata(syllabus),
       syllabusSummary,
+      generationBatch: batch,
       generated: savedDrafts,
       questions: savedDrafts,
       savedQuestions: [],

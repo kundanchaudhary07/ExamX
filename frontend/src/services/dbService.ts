@@ -13,7 +13,8 @@ import {
   StudentQuery,
   ProctoringEventRecord,
   AuditLog,
-  QuestionOption
+  QuestionOption,
+  AiGenerationBatch
 } from '../types';
 
 const AUTH_TOKEN_KEY = 'examx_auth_token';
@@ -224,6 +225,9 @@ export function mapBackendQuestionToFrontend(q: any): Question {
     syllabusUnit: q.syllabusUnit,
     syllabusTopic: q.syllabusTopic,
     sourceReference: q.sourceReference,
+    generationId: q.generationId,
+    aiProvider: q.aiProvider,
+    aiModel: q.aiModel,
     createdBy: q.createdBy,
     createdByName: q.createdByName,
     createdAt: q.createdAt
@@ -426,6 +430,40 @@ export const dbService = {
       token: data.token,
       user: mapBackendUserToFrontend(data.user)
     };
+  },
+
+  async signUpStudent(payload: {
+    name: string;
+    email: string;
+    phone: string;
+    dob: string;
+    course: string;
+    department: string;
+    semester: string;
+    facultyId: string;
+  }): Promise<{ user: User; credentials: { studentId: string; initialPassword: string } }> {
+    const res = await fetch(`${API_BASE}/auth/signup/student`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await handleApiResponse<{
+      user: any;
+      credentials: { studentId: string; initialPassword: string };
+    }>(res);
+    return {
+      user: mapBackendUserToFrontend(data.user),
+      credentials: data.credentials
+    };
+  },
+
+  async changeStudentPassword(currentPassword: string, newPassword: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/auth/password`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ currentPassword, newPassword })
+    });
+    await handleApiResponse<{ success: true }>(res);
   },
 
   async getCurrentUser(): Promise<User | null> {
@@ -667,6 +705,22 @@ export const dbService = {
   },
 
   // --- QUESTION BANK & SERVER-SIDE AI WITH SYLLABUS UPLOAD ---
+  async getSubjects(): Promise<string[]> {
+    const res = await fetch(`${API_BASE}/subjects`, { headers: getAuthHeaders() });
+    const data = await handleApiResponse<{ subjects: string[] }>(res);
+    return data.subjects || [];
+  },
+
+  async createSubject(name: string): Promise<string> {
+    const res = await fetch(`${API_BASE}/subjects`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ name })
+    });
+    const data = await handleApiResponse<{ subject: string }>(res);
+    return data.subject;
+  },
+
   async getQuestions(filters?: {
     subject?: string;
     course?: string;
@@ -822,6 +876,21 @@ export const dbService = {
     return (data.drafts || []).map(mapBackendQuestionToFrontend);
   },
 
+  async getAiGenerationBatches(): Promise<AiGenerationBatch[]> {
+    const res = await fetch(`${API_BASE}/ai/generation-batches`, { headers: getAuthHeaders() });
+    const data = await handleApiResponse<{ batches: AiGenerationBatch[] }>(res);
+    return data.batches || [];
+  },
+
+  async getAiGenerationBatchQuestions(generationId: string): Promise<Question[]> {
+    const res = await fetch(
+      `${API_BASE}/ai/generation-batches/${encodeURIComponent(generationId)}/questions`,
+      { headers: getAuthHeaders() }
+    );
+    const data = await handleApiResponse<{ questions: any[] }>(res);
+    return (data.questions || []).map(mapBackendQuestionToFrontend);
+  },
+
   async updateAiDraft(question: Question): Promise<Question> {
     const questionId = question.questionId || question.id;
     const res = await fetch(`${API_BASE}/ai/questions/drafts/${encodeURIComponent(questionId)}`, {
@@ -877,7 +946,8 @@ export const dbService = {
   }): Promise<{
     generated: Question[];
     savedQuestions: Question[];
-    provider: 'GEMINI';
+    provider: 'GEMINI' | 'GROQ';
+    generationBatch: AiGenerationBatch;
     syllabus?: { fileName: string; fileType: string; charCount: number };
   }> {
     const res = await fetch(`${API_BASE}/ai/questions/generate`, {
@@ -888,12 +958,14 @@ export const dbService = {
     const data = await handleApiResponse<{
       generated: any[];
       savedQuestions: any[];
-      provider: 'GEMINI';
+      provider: 'GEMINI' | 'GROQ';
+      generationBatch: AiGenerationBatch;
     }>(res);
     return {
       generated: (data.generated || []).map(mapBackendQuestionToFrontend),
       savedQuestions: (data.savedQuestions || []).map(mapBackendQuestionToFrontend),
-      provider: data.provider
+      provider: data.provider,
+      generationBatch: data.generationBatch
     };
   },
 

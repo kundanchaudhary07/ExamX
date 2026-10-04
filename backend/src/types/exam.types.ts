@@ -13,7 +13,7 @@ export type QuestionDifficulty = 'EASY' | 'MEDIUM' | 'HARD';
 export type QuestionSource = 'MANUAL' | 'AI_GENERATED';
 
 export type QuestionStatus = 'DRAFT' | 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
-export type AiReviewStatus = 'PENDING_TEACHER_REVIEW' | 'APPROVED';
+export type AiReviewStatus = 'PENDING_TEACHER_REVIEW' | 'APPROVED' | 'DISCARDED';
 
 export type AssignmentStatus = 'ASSIGNED' | 'IN_PROGRESS' | 'SUBMITTED' | 'GRADED' | 'EXPIRED';
 
@@ -43,6 +43,7 @@ export interface IQuestionInput {
   syllabusUnit?: string;
   syllabusTopic?: string;
   sourceReference?: string;
+  generationId?: string;
   aiProvider?: 'GEMINI' | 'GROQ';
   aiModel?: string;
   approvedBy?: string;

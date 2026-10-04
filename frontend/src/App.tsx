@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   User,
   UserRole,
@@ -13,7 +13,7 @@ import {
 } from './types';
 import { dbService } from './services/dbService';
 import { realtimeService } from './services/realtimeService';
-import { ProctoringModule } from './components/ProctoringModule';
+import { ProctoringHandle, ProctoringModule } from './components/ProctoringModule';
 import { StudentDashboard } from './components/dashboard/StudentDashboard';
 import { TeacherDashboard } from './components/dashboard/TeacherDashboard';
 import { AdminDashboard } from './components/dashboard/AdminDashboard';
@@ -115,6 +115,7 @@ export default function App() {
   const [liveQueryReasonType, setLiveQueryReasonType] = useState<StudentQuery['reasonType']>('INCORRECT_QUESTION');
   const [isSubmittingLiveQuery, setIsSubmittingLiveQuery] = useState(false);
   const [liveQuerySuccess, setLiveQuerySuccess] = useState<string | null>(null);
+  const proctoringRef = useRef<ProctoringHandle>(null);
 
   // Unblock review request state for terminated student
   const [showUnblockRequestModal, setShowUnblockRequestModal] = useState(false);
@@ -619,6 +620,7 @@ export default function App() {
         document.exitFullscreen().catch(() => {});
       }
       setActiveWarningPopup(null);
+      setExamEngineError(null);
 
       try {
         const submitRes = await dbService.submitExamAttempt(activeAttempt.attemptId, {
@@ -628,6 +630,7 @@ export default function App() {
           terminationReason: reason
         });
 
+        proctoringRef.current?.stopMediaStream();
         setLastSubmissionSummary({
           attempt: submitRes.attempt,
           resultPublished: submitRes.resultPublished,
@@ -641,7 +644,6 @@ export default function App() {
         }
       } catch (err: any) {
         setExamEngineError(err?.message || 'Failed to submit examination attempt');
-        setView(ViewState.EXAM_RESULT);
       }
     },
     [activeAttempt, answers, markedForReview, proctorLogs.length, buildBackendAnswersPayload, currentUser, loadRoleData]
@@ -950,6 +952,11 @@ export default function App() {
         {view === ViewState.EXAM_ACTIVE && examQuestions.length > 0 && (
           <div className="flex-1 bg-slate-100 dark:bg-slate-950 p-4 lg:p-6 w-full">
             <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+              {examEngineError && (
+                <div className="lg:col-span-4 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-[14px] font-medium text-red-600 dark:text-red-400">
+                  {examEngineError}
+                </div>
+              )}
               {/* Left: Question Area (Natural Vertical Scroll) */}
               <div className="lg:col-span-3 space-y-4">
                 {/* Exam Header Bar */}
@@ -1143,6 +1150,7 @@ export default function App() {
               {/* Right Sidebar: Proctoring & Question Palette (Sticky on desktop, stacks cleanly on mobile) */}
               <div className="lg:col-span-1 space-y-5 lg:sticky lg:top-4">
                 <ProctoringModule
+                  ref={proctoringRef}
                   isExamActive={view === ViewState.EXAM_ACTIVE}
                   warningCount={proctorLogs.length}
                   maxWarnings={5}

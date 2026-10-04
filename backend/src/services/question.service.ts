@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { Question, IQuestionDocument } from '../models/Question';
+import { AiGenerationBatch } from '../models/AiGenerationBatch';
 import { Exam } from '../models/Exam';
 import { ExamService } from './exam.service';
 import { AuditService } from './audit.service';
@@ -235,6 +236,7 @@ export class QuestionService {
       syllabusUnit: input.syllabusUnit,
       syllabusTopic: input.syllabusTopic,
       sourceReference: input.sourceReference,
+      generationId: input.generationId,
       aiProvider: input.aiProvider,
       aiModel: input.aiModel,
       dedupeKey:
@@ -268,7 +270,11 @@ export class QuestionService {
     return question;
   }
 
-  static async createAiDrafts(inputs: IQuestionInput[], user: JwtUserPayload): Promise<IQuestionDocument[]> {
+  static async createAiDrafts(
+    inputs: IQuestionInput[],
+    user: JwtUserPayload,
+    generationId: string
+  ): Promise<IQuestionDocument[]> {
     const created: IQuestionDocument[] = [];
     try {
       for (const input of inputs) {
@@ -277,7 +283,8 @@ export class QuestionService {
             ...input,
             source: 'AI_GENERATED',
             status: 'DRAFT',
-            reviewStatus: 'PENDING_TEACHER_REVIEW'
+            reviewStatus: 'PENDING_TEACHER_REVIEW',
+            generationId
           },
           user,
           { allowAiDraft: true }
@@ -289,6 +296,7 @@ export class QuestionService {
       if (created.length) {
         await Question.deleteMany({ _id: { $in: created.map((draft) => draft._id) } });
       }
+      await AiGenerationBatch.deleteOne({ generationId, generatedBy: user.userId });
       throw err;
     }
   }
@@ -385,6 +393,7 @@ export class QuestionService {
       targetType: 'QUESTION',
       targetId: approved.questionId,
       details: JSON.stringify({
+        generationId: approved.generationId || '',
         provider: approved.aiProvider || 'unknown',
         model: approved.aiModel || 'unknown',
         teacherUserId: approved.createdBy,
@@ -410,8 +419,10 @@ export class QuestionService {
       err.statusCode = 409;
       throw err;
     }
-    await Question.deleteOne({ _id: question._id, status: 'DRAFT', reviewStatus: 'PENDING_TEACHER_REVIEW' });
-    emitTeacherAndAdmin(question.createdBy, 'question.deleted', { questionId }, user.userId);
+    question.status = 'ARCHIVED';
+    question.reviewStatus = 'DISCARDED';
+    await question.save();
+    emitTeacherAndAdmin(question.createdBy, 'question.updated', { question: question.toJSON() }, user.userId);
     await AuditService.record({
       actorId: user.userId,
       actorName: user.name,
@@ -419,7 +430,14 @@ export class QuestionService {
       action: 'AI_QUESTION_DISCARDED',
       targetType: 'QUESTION',
       targetId: questionId,
-      details: `Discarded AI question draft ${questionId}`
+      details: JSON.stringify({
+        generationId: question.generationId || '',
+        provider: question.aiProvider || 'unknown',
+        model: question.aiModel || 'unknown',
+        teacherUserId: question.createdBy,
+        syllabusId: question.syllabusId || 'unknown',
+        approvalStatus: 'DISCARDED'
+      })
     });
   }
 

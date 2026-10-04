@@ -4,11 +4,17 @@ import {
   AiQuestionService,
   callGeminiWithTransientRetries,
   GeminiContentClient,
-  GeminiRetryHooks
+  GeminiRetryHooks,
+  validateQuestionCount
 } from '../src/services/ai.service';
 import { Question } from '../src/models/Question';
 import { Syllabus } from '../src/models/Syllabus';
+import { AiGenerationBatch } from '../src/models/AiGenerationBatch';
+import { AuditLog } from '../src/models/AuditLog';
+import { Subject } from '../src/models/Subject';
 import { JwtUserPayload } from '../src/types/auth.types';
+import { normalizeSubjectName } from '../src/services/subject.service';
+import { AiGenerationBatchService } from '../src/services/ai-generation-batch.service';
 
 function providerError(status: number, code = 'UNAVAILABLE'): Error & { status: number; code: string } {
   return Object.assign(new Error(`provider status ${status}`), { status, code });
@@ -34,6 +40,18 @@ const providerParams = {
 };
 
 async function run(): Promise<void> {
+  for (const validCount of [1, 10, 50, 100, 200]) {
+    assert.equal(validateQuestionCount(validCount), validCount);
+  }
+  for (const invalidCount of [0, -1, 201, 1.5, Number.NaN]) {
+    assert.throws(
+      () => validateQuestionCount(invalidCount),
+      (error: any) => error.statusCode === 400 && error.code === 'AI_INVALID_REQUEST'
+    );
+  }
+  assert.equal(normalizeSubjectName('  Data   Structures & Algorithms  '), 'Data Structures & Algorithms');
+  assert.throws(() => normalizeSubjectName(' \t '), (error: any) => error.statusCode === 400);
+
   const originalKey = process.env.GEMINI_API_KEY;
   const originalProvider = process.env.AI_PROVIDER;
   process.env.AI_PROVIDER = 'GEMINI';
@@ -277,11 +295,149 @@ async function run(): Promise<void> {
         releaseSlowCall();
         const firstResult = await firstGenPromise;
         assert.equal(firstResult.generated.length, 1);
+        assert(firstResult.generated[0].generationId, 'Generated question must retain its batch ID');
+        assert(await AiGenerationBatch.exists({ generationId: firstResult.generationBatch.generationId }));
         assert.equal(AiQuestionService.isUserGenerating(dupTeacher.userId), false);
       } finally {
         await Question.deleteMany({ syllabusId: dupSyllabusId });
+        await AiGenerationBatch.deleteMany({ generatedBy: dupTeacher.userId });
+        await Subject.deleteMany({ createdBy: dupTeacher.userId });
         await Syllabus.deleteOne({ syllabusId: dupSyllabusId });
         AiQuestionService.clearActiveGenerations();
+      }
+    }
+
+    // 9b. legacy AI questions appear as a batch only when the audit linkage is exact
+    {
+      const legacyTeacher: JwtUserPayload = {
+        id: `legacy-test-${Date.now()}`,
+        userId: `125legacy${Date.now()}`,
+        name: 'Legacy Batch Test Teacher',
+        role: 'TEACHER'
+      };
+      const otherTeacher: JwtUserPayload = {
+        id: `other-legacy-test-${Date.now()}`,
+        userId: `125other${Date.now()}`,
+        name: 'Other Legacy Test Teacher',
+        role: 'TEACHER'
+      };
+      const legacySyllabusId = `SYL-legacy-${Date.now()}`;
+      const firstAuditAt = new Date(Date.now());
+      const firstAuditId = `AUD-LEGACY-${Date.now()}`;
+      const secondAuditAt = new Date(firstAuditAt.getTime() + 5000);
+      const secondAuditId = `${firstAuditId}-UNMATCHED`;
+
+      try {
+        await Syllabus.create({
+          syllabusId: legacySyllabusId,
+          uploadedBy: legacyTeacher.userId,
+          uploadedByRole: 'TEACHER',
+          course: 'B.Tech CSE',
+          semester: 'Semester 4',
+          subject: 'Operating Systems',
+          fileName: 'legacy-test-syllabus.txt',
+          fileType: 'TXT',
+          charCount: providerParams.syllabusText.length,
+          wordCount: providerParams.syllabusText.split(/\s+/).length,
+          extractedText: providerParams.syllabusText
+        });
+
+        await Question.create([0, 1, 2, 3].map((index) => ({
+          questionId: `QLEG-${Date.now()}-${index}`,
+          questionText: `Legacy batch question ${index}`,
+          subject: 'Operating Systems',
+          topic: 'Scheduling',
+          course: 'B.Tech CSE',
+          semester: 'Semester 4',
+          questionType: 'MCQ' as const,
+          difficulty: 'MEDIUM' as const,
+          options: [
+            { id: 'A', text: 'Option A' },
+            { id: 'B', text: 'Option B' }
+          ],
+          correctAnswer: 'A',
+          correctOption: 'A',
+          marks: 2,
+          negativeMarks: 0,
+          explanation: 'Test question.',
+          createdBy: legacyTeacher.userId,
+          source: 'AI_GENERATED' as const,
+          reviewStatus: 'APPROVED' as const,
+          status: 'ACTIVE' as const,
+          syllabusId: legacySyllabusId,
+          createdAt: new Date(index < 3
+            ? firstAuditAt.getTime() - 1000 + index * 250
+            : firstAuditAt.getTime() + 1000)
+        })));
+
+        await AuditLog.create([
+          {
+            auditId: firstAuditId,
+            actorId: legacyTeacher.userId,
+            actorName: legacyTeacher.name,
+            actorRole: 'TEACHER',
+            action: 'AI_QUESTIONS_GENERATED',
+            targetType: 'SYLLABUS',
+            targetId: legacySyllabusId,
+            timestamp: firstAuditAt,
+            details: JSON.stringify({
+              provider: 'GROQ',
+              model: 'openai/gpt-oss-120b',
+              teacherUserId: legacyTeacher.userId,
+              syllabusId: legacySyllabusId,
+              generatedCount: 3,
+              timestamp: firstAuditAt.toISOString()
+            })
+          },
+          {
+            auditId: secondAuditId,
+            actorId: legacyTeacher.userId,
+            actorName: legacyTeacher.name,
+            actorRole: 'TEACHER',
+            action: 'AI_QUESTIONS_GENERATED',
+            targetType: 'SYLLABUS',
+            targetId: legacySyllabusId,
+            timestamp: secondAuditAt,
+            details: JSON.stringify({
+              provider: 'GROQ',
+              model: 'openai/gpt-oss-120b',
+              teacherUserId: legacyTeacher.userId,
+              syllabusId: legacySyllabusId,
+              generatedCount: 2,
+              timestamp: secondAuditAt.toISOString()
+            })
+          }
+        ]);
+
+        const teacherBatches = await AiGenerationBatchService.list(legacyTeacher);
+        const legacyBatch = teacherBatches.find((batch) => batch.generationId === `LEGACY-AUDIT-${firstAuditId}`);
+        assert(legacyBatch, 'An exact audit-to-question match should be shown as a historical batch');
+        assert.equal(legacyBatch.generatedCount, 3);
+        assert.equal(legacyBatch.questionIds.length, 3);
+        assert.equal(teacherBatches.some((batch) => batch.generationId === `LEGACY-AUDIT-${secondAuditId}`), false,
+          'A count mismatch must not be guessed into a batch');
+        assert.equal((await AiGenerationBatchService.list(otherTeacher)).length, 0,
+          'Teachers must not see another teacher’s legacy batches');
+        assert.equal((await AiGenerationBatchService.list({
+          ...legacyTeacher,
+          role: 'ADMIN'
+        })).some((batch) => batch.generationId === `LEGACY-AUDIT-${firstAuditId}`), true,
+        'Admins should be able to see historical teacher batches');
+
+        const historicalQuestions = await AiGenerationBatchService.getQuestions(legacyBatch.generationId, legacyTeacher);
+        assert.equal(historicalQuestions.length, 3);
+        assert(historicalQuestions.every((question: any) => question.generationId === legacyBatch.generationId),
+          'Legacy generation IDs should be added to API results only');
+        assert.equal(await Question.countDocuments({ syllabusId: legacySyllabusId, generationId: { $exists: true } }), 0,
+          'Historical grouping must not modify stored questions');
+        await assert.rejects(
+          () => AiGenerationBatchService.getQuestions(legacyBatch.generationId, otherTeacher),
+          (error: any) => error.statusCode === 404
+        );
+      } finally {
+        await Question.deleteMany({ syllabusId: legacySyllabusId });
+        await AuditLog.deleteMany({ targetId: legacySyllabusId, actorId: legacyTeacher.userId });
+        await Syllabus.deleteOne({ syllabusId: legacySyllabusId });
       }
     }
 

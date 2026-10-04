@@ -5,12 +5,181 @@ import { logger } from '../utils/logger';
 import { AuditService } from './audit.service';
 import { isUsingEmbeddedDatabase } from '../config/database';
 import { isPersistenceEnabled, scheduleSnapshotSave } from '../config/persistence';
-import { TEACHER_ID_REGEX, STUDENT_ID_REGEX } from '../utils/credential.generator';
+import {
+  TEACHER_ID_REGEX,
+  STUDENT_ID_REGEX,
+  createStudentWithGeneratedId,
+  generateInitialPassword,
+  isValidTeacherId,
+  validateDateOfBirth
+} from '../utils/credential.generator';
 import { emitAdminEvent, emitTeacherAndAdmin } from '../realtime/socket';
 
 const INITIAL_CREDENTIAL_PASSWORD_REGEX = /^([A-Za-z][A-Za-z0-9._-]*)@([12][0-9]{3})$/;
 
 export class AuthService {
+  static async signUpStudent(data: {
+    name: unknown;
+    email: unknown;
+    phone: unknown;
+    dob: unknown;
+    course: unknown;
+    department: unknown;
+    semester: unknown;
+    facultyId: unknown;
+  }): Promise<{ user: any; credentials: { studentId: string; initialPassword: string } }> {
+    const name = typeof data?.name === 'string' ? data.name.trim().replace(/\s+/g, ' ') : '';
+    const email = typeof data?.email === 'string' ? data.email.trim().toLocaleLowerCase() : '';
+    const phone = typeof data?.phone === 'string' ? data.phone.trim() : '';
+    const rawDob = typeof data?.dob === 'string' ? data.dob.trim() : '';
+    const course = typeof data?.course === 'string' ? data.course.trim().replace(/\s+/g, ' ') : '';
+    const semester = typeof data?.semester === 'string' ? data.semester.trim() : '';
+    const department = typeof data?.department === 'string' ? data.department.trim().replace(/\s+/g, ' ') : '';
+    const facultyId = typeof data?.facultyId === 'string' ? data.facultyId.trim() : '';
+
+    if (name.length < 2 || name.length > 120) {
+      const error: any = new Error('Enter a name up to 120 characters.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      const error: any = new Error('Enter a valid email address.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!/^[+]?[\d\s().-]{7,20}$/.test(phone) || phone.replace(/\D/g, '').length < 7) {
+      const error: any = new Error('Enter a valid phone number.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!course || course.length > 120) {
+      const error: any = new Error('Select or enter a valid course.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!/^Semester [1-8]$/.test(semester)) {
+      const error: any = new Error('Select a valid semester.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!department || department.length > 120) {
+      const error: any = new Error('Enter a department up to 120 characters.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!isValidTeacherId(facultyId)) {
+      const error: any = new Error('Enter a valid Faculty ID.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const { dob, year: dobYear } = validateDateOfBirth(rawDob);
+    const faculty = await User.findOne({
+      userId: facultyId,
+      role: 'TEACHER',
+      status: 'ACTIVE'
+    }).select('userId');
+    if (!faculty) {
+      const error: any = new Error('Faculty ID does not belong to an active teacher.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (await User.exists({ email })) {
+      const error: any = new Error('An account with this email already exists.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const initialPassword = generateInitialPassword(name, dobYear);
+    const passwordHash = await hashPassword(initialPassword);
+    let student;
+    try {
+      student = await createStudentWithGeneratedId(studentId =>
+        User.create({
+          userId: studentId,
+          name,
+          email,
+          phone,
+          dob,
+          dobYear,
+          passwordHash,
+          role: 'STUDENT',
+          status: 'ACTIVE',
+          department,
+          course,
+          semester,
+          enrollmentNo: studentId,
+          managedBy: [faculty.userId],
+          teacherIds: [faculty.userId],
+          createdBy: faculty.userId
+        })
+      );
+    } catch (error: any) {
+      if (error?.code === 11000 && (error?.keyPattern?.email || error?.keyValue?.email)) {
+        const conflict: any = new Error('An account with this email already exists. Please sign in instead.');
+        conflict.statusCode = 409;
+        throw conflict;
+      }
+      throw error;
+    }
+
+    await AuditService.record({
+      actorId: student.userId,
+      actorName: student.name,
+      actorRole: 'STUDENT',
+      action: 'STUDENT_SELF_SIGNUP',
+      targetType: 'USER',
+      targetId: student.userId,
+      details: `Student account created through public self-signup and assigned to faculty ${faculty.userId}; course=${course}; semester=${semester}; department=${department}`
+    });
+
+    emitTeacherAndAdmin([faculty.userId], 'student.created', { student: student.toJSON() });
+    logger.info(`Student self-signup completed: ${student.userId}`);
+    return {
+      user: student.toJSON(),
+      credentials: { studentId: student.userId, initialPassword }
+    };
+  }
+
+  static async changeStudentPassword(
+    userId: string,
+    currentPassword: unknown,
+    newPassword: unknown
+  ): Promise<{ success: true }> {
+    if (
+      typeof currentPassword !== 'string' ||
+      typeof newPassword !== 'string' ||
+      newPassword.length < 8 ||
+      Buffer.byteLength(newPassword, 'utf8') > 72
+    ) {
+      const error: any = new Error('New password must be at least 8 characters and no more than 72 UTF-8 bytes.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const student = await User.findOne({ userId, role: 'STUDENT' }).select('+passwordHash');
+    if (!student || !(await verifyPassword(currentPassword, student.passwordHash))) {
+      const error: any = new Error('Current password is incorrect.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    student.passwordHash = await hashPassword(newPassword);
+    await student.save();
+    await AuditService.record({
+      actorId: student.userId,
+      actorName: student.name,
+      actorRole: 'STUDENT',
+      action: 'USER_PASSWORD_CHANGED',
+      targetType: 'USER',
+      targetId: student.userId,
+      details: 'Student changed their own password'
+    });
+    logger.info(`Student password changed: ${student.userId}`);
+    return { success: true };
+  }
+
   static async login(userId: string, plainTextPassword: string): Promise<{ token: string; user: any }> {
     if (
       !userId ||

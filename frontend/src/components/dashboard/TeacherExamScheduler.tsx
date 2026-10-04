@@ -11,6 +11,7 @@ import {
   useConfirmAction
 } from '../common/SharedUI';
 import { dbService } from '../../services/dbService';
+import { CreatableSubjectCombobox } from '../common/CreatableSubjectCombobox';
 import {
   Plus,
   Edit2,
@@ -873,17 +874,16 @@ export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
                     className="w-full h-12 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-[15px] text-slate-900 dark:text-white outline-none focus:border-blue-500"
                   />
                 </div>
-                <div>
+                <div className="md:col-span-2">
                   <label className="block text-[14px] font-medium text-slate-700 dark:text-slate-300 mb-1.5">
                     Subject *
                   </label>
-                  <input
-                    type="text"
-                    required
+                  <CreatableSubjectCombobox
                     value={formData.subject || ''}
-                    onChange={e => setFormData({ ...formData, subject: e.target.value })}
-                    placeholder="e.g., Data Structures"
-                    className="w-full h-12 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-[15px] text-slate-900 dark:text-white outline-none focus:border-blue-500"
+                    onChange={subject => setFormData(current => ({ ...current, subject }))}
+                    onError={setFormError}
+                    placeholder="Search or create a subject"
+                    required
                   />
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

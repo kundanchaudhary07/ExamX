@@ -17,6 +17,7 @@ Returns backend service status and MongoDB database connectivity.
 ## 2. Authentication (`/api/auth`)
 
 - `POST /api/auth/login`: Authenticates `ADMIN`, `TEACHER`, or `STUDENT` using 8-digit `userId` and `password`.
+- `POST /api/auth/signup/student`: Public, rate-limited student self-signup. The backend assigns the student ID, hashes the chosen password, and returns an authenticated student session; client-supplied role/ID fields are ignored.
 - `GET /api/auth/me` (also `/api/users/me`): Returns the authenticated user profile (excluding `passwordHash`).
 
 ---
@@ -49,7 +50,11 @@ Returns backend service status and MongoDB database connectivity.
 ## 5. AI Question Generation (`/api/ai`)
 
 - `GET /api/ai/status` (`TEACHER`, `ADMIN`): Reports the selected backend provider/model and whether generation is configured, ready, or pending review.
-- `POST /api/ai/questions/generate` (`TEACHER`, `ADMIN`): Generates validated, syllabus-grounded MCQ drafts using the backend provider selected by `AI_PROVIDER` (`GEMINI` or `GROQ`). Drafts remain pending until their owning teacher approves them; provider failures do not trigger cross-provider fallback.
+- `POST /api/ai/questions/generate` (`TEACHER`, `ADMIN`): Generates 1–200 validated, syllabus-grounded MCQ drafts using the backend provider selected by `AI_PROVIDER` (`GEMINI` or `GROQ`). Each successful request creates a persisted generation batch and associates its questions with that batch. Drafts remain pending until their owning teacher approves them; provider failures do not trigger cross-provider fallback.
+- `GET /api/ai/generation-batches` (`TEACHER`, `ADMIN`): Lists batch metadata and live review counts. Teachers see only their own batches; admins see all batches. Historical runs are included only when a generation audit matches the exact teacher, syllabus, time window, and generated count; ambiguous records are not grouped.
+- `GET /api/ai/generation-batches/:generationId/questions` (`TEACHER`, `ADMIN`): Lists questions associated with a batch, subject to teacher ownership. For a verified historical run, the response supplies a virtual generation ID without modifying stored question records.
+- `GET /api/subjects` (`TEACHER`, `ADMIN`): Lists normalized subject suggestions from registered subjects and existing ExamX records.
+- `POST /api/subjects` (`TEACHER`, `ADMIN`): Registers or returns a whitespace/case-normalized subject name.
 
 ---
 
