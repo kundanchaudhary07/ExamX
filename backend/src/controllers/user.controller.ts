@@ -216,6 +216,10 @@ export class UserController {
             queriesCount: (details.queries || []).length
           },
           recentExams: details.recentExams || [],
+          examHistory: details.examHistory || [],
+          performance: details.performance,
+          proctoringSummary: details.proctoringSummary,
+          assistance: details.assistance,
           results: mappedResults,
           queries: details.queries || []
         }

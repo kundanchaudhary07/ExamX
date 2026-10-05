@@ -7,6 +7,132 @@ import { logger } from '../utils/logger';
 
 export class ResultService {
   /**
+   * Return only aggregate rank information for the authenticated student.
+   */
+  static async getStudentRankings(
+    examId: string | undefined,
+    user: JwtUserPayload
+  ): Promise<{
+    examRank: { rank: number; totalRankedStudents: number; percentile: number; score: number; totalMarks: number } | null;
+    overallRank: {
+      rank: number;
+      totalRankedStudents: number;
+      percentile: number;
+      averagePercentage: number;
+      examsAttempted: number;
+      passed: number;
+    } | null;
+  }> {
+    if (user.role !== 'STUDENT') {
+      const err: any = new Error('Forbidden: Aggregate student rankings are only available to students');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const visibleStatuses = ['PUBLISHED', 'QUERIED', 'REVISED'] as const;
+    const ownQuery = {
+      studentId: user.userId,
+      status: { $in: visibleStatuses },
+      ...(examId ? { examId } : {})
+    };
+
+    const [ownResults, peerExamResults, allPublishedResults] = await Promise.all([
+      Result.find(ownQuery).sort({ submittedAt: -1, _id: -1 }).lean(),
+      examId
+        ? Result.find({ examId, status: { $in: visibleStatuses } })
+            .select('studentId examId attemptId score totalMarks percentage submittedAt')
+            .sort({ submittedAt: -1, _id: -1 })
+            .lean()
+        : Promise.resolve([]),
+      Result.find({ status: { $in: visibleStatuses } })
+        .select('studentId examId attemptId score totalMarks percentage passed submittedAt')
+        .sort({ submittedAt: -1, _id: -1 })
+        .lean()
+    ]);
+
+    const latestForStudentAndExam = <T extends {
+      studentId: string;
+      examId: string;
+      submittedAt: Date;
+    }>(records: T[]): T[] => {
+      const latest = new Map<string, T>();
+      records.forEach(record => {
+        const key = `${record.studentId}:${record.examId}`;
+        if (!latest.has(key)) latest.set(key, record);
+      });
+      return Array.from(latest.values());
+    };
+    const getPercentile = (rank: number, total: number): number =>
+      total <= 1 ? 100 : Math.round(((total - rank) / total) * 10000) / 100;
+    const getRank = <T>(records: T[], scoreOf: (record: T) => number, ownScore: number) =>
+      1 + records.filter(record => scoreOf(record) > ownScore).length;
+
+    const ownExamResult = examId
+      ? ownResults.find(result => result.examId === examId)
+      : undefined;
+    const rankedExamResults = examId
+      ? latestForStudentAndExam(peerExamResults)
+          .filter(result => Number.isFinite(result.score))
+          .map(result => ({
+            studentId: result.studentId,
+            score: result.score,
+            totalMarks: result.totalMarks,
+            percentage: result.percentage
+          }))
+      : [];
+    const examRank = ownExamResult && rankedExamResults.length > 0
+      ? (() => {
+          const ownScore = ownExamResult.score;
+          const rank = getRank(rankedExamResults, result => result.score, ownScore);
+          return {
+            rank,
+            totalRankedStudents: rankedExamResults.length,
+            percentile: getPercentile(rank, rankedExamResults.length),
+            score: ownExamResult.score,
+            totalMarks: ownExamResult.totalMarks
+          };
+        })()
+      : null;
+
+    const overallByStudentAndExam = latestForStudentAndExam(allPublishedResults);
+    const overallByStudent = new Map<string, { scores: number[]; passed: number }>();
+    overallByStudentAndExam.forEach(result => {
+      const percentage = Number.isFinite(result.percentage)
+        ? result.percentage
+        : result.totalMarks > 0
+          ? (result.score / result.totalMarks) * 100
+          : null;
+      if (percentage === null || !Number.isFinite(percentage)) return;
+      const aggregate = overallByStudent.get(result.studentId) || { scores: [], passed: 0 };
+      aggregate.scores.push(percentage);
+      if (result.passed) aggregate.passed += 1;
+      overallByStudent.set(result.studentId, aggregate);
+    });
+    const overallRows = Array.from(overallByStudent, ([studentId, aggregate]) => ({
+      studentId,
+      averagePercentage: aggregate.scores.reduce((sum, score) => sum + score, 0) / aggregate.scores.length,
+      examsAttempted: aggregate.scores.length,
+      passed: aggregate.passed
+    }));
+    const ownOverall = overallRows.find(row => row.studentId === user.userId);
+    const overallRank = ownOverall
+      ? (() => {
+          const rank = getRank(overallRows, row => row.averagePercentage, ownOverall.averagePercentage);
+          return {
+            rank,
+            totalRankedStudents: overallRows.length,
+            percentile: getPercentile(rank, overallRows.length),
+            averagePercentage: Math.round(ownOverall.averagePercentage * 100) / 100,
+            examsAttempted: ownOverall.examsAttempted,
+            passed: ownOverall.passed
+          };
+        })()
+      : null;
+
+    return { examRank, overallRank };
+  }
+
+  /**
    * List results with strict RBAC and publication visibility:
    * - STUDENT: only sees OWN results that are PUBLISHED / QUERIED / REVISED
    * - TEACHER: only sees results for exams created by themselves

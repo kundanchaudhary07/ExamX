@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { User, StudentResult, StudentQuery, ScheduledExam, ProctoringEventRecord } from '../../types';
 import { dbService } from '../../services/dbService';
 import { realtimeService } from '../../services/realtimeService';
 import { PerformanceTrendChart } from '../Charts';
+import { ProctoringExamInsightsModal } from './ProctoringExamInsightsModal';
+import { OverallPerformanceSection } from './OverallPerformanceSection';
 import {
   PageHeader,
   KpiCard,
@@ -44,8 +46,26 @@ interface StudentDashboardProps {
     examId?: string,
     resultId?: string
   ) => Promise<void> | void;
-  onRefreshData?: () => Promise<void> | void;
+  onRefreshData?: () => Promise<boolean | void> | void;
+  onRefreshExamData?: (user: User) => Promise<boolean>;
 }
+
+const isFinalizedAttempt = (status?: string): boolean =>
+  status === 'SUBMITTED' ||
+  status === 'AUTO_SUBMITTED' ||
+  status === 'EVALUATED' ||
+  status === 'TERMINATED' ||
+  status === 'EXPIRED' ||
+  status === 'FORCE_SUBMITTED';
+
+const getStudentAttemptStatusLabel = (status?: string): string =>
+  status === 'AUTO_SUBMITTED' || status === 'FORCE_SUBMITTED' || status === 'EXPIRED'
+    ? 'Auto Submitted'
+    : status === 'IN_PROGRESS'
+    ? 'In Progress'
+    : status === 'EVALUATED'
+    ? 'Submitted'
+    : status || 'Not Attempted';
 
 export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   user,
@@ -56,7 +76,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   exams,
   onStartExam,
   onRaiseQuery,
-  onRefreshData
+  onRefreshData,
+  onRefreshExamData
 }) => {
   const [showQueryModal, setShowQueryModal] = useState(false);
   const [queryExamId, setQueryExamId] = useState('');
@@ -70,9 +91,15 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const [startingExamId, setStartingExamId] = useState<string | null>(null);
   const [examError, setExamError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [examPollingEnabled, setExamPollingEnabled] = useState(false);
+  const refreshInProgressRef = useRef(false);
   const [proctoringEvents, setProctoringEvents] = useState<ProctoringEventRecord[]>([]);
   const [isLoadingProctoring, setIsLoadingProctoring] = useState(false);
   const [proctoringError, setProctoringError] = useState<string | null>(null);
+  const [selectedProctoringExamId, setSelectedProctoringExamId] = useState<string | null>(null);
+  const [studentRankings, setStudentRankings] = useState<Awaited<
+    ReturnType<typeof dbService.getMyRankings>
+  > | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
@@ -85,18 +112,37 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const [selectedQuery, setSelectedQuery] = useState<StudentQuery | null>(null);
   const [examListFilter, setExamListFilter] = useState<'ALL' | 'LIVE' | 'IN_PROGRESS'>('ALL');
 
-  const loadProctoring = async () => {
+  const loadProctoring = async (): Promise<boolean> => {
     setIsLoadingProctoring(true);
     setProctoringError(null);
     try {
       const events = await dbService.getProctoringEvents();
-      setProctoringEvents(events);
+      setProctoringEvents(events.filter(event =>
+        event.studentId === user.userId || event.studentId === user.id
+      ));
+      return true;
     } catch {
       setProctoringError('Unable to load proctoring events.');
+      return false;
     } finally {
       setIsLoadingProctoring(false);
     }
   };
+
+  useEffect(() => {
+    if (activeTab !== 'analytics') return;
+    let active = true;
+    dbService.getMyRankings()
+      .then(rankings => {
+        if (active) setStudentRankings(rankings);
+      })
+      .catch(() => {
+        if (active) setStudentRankings(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeTab]);
 
   useEffect(() => {
     loadProctoring();
@@ -105,6 +151,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       if (payload.event === 'proctoring.event' && payload.data?.event) {
         setProctoringEvents(prev => {
           const incoming = payload.data.event as ProctoringEventRecord;
+          if (incoming.studentId !== user.userId && incoming.studentId !== user.id) return prev;
           if (prev.some(e => e.eventId === incoming.eventId)) return prev;
           return [incoming, ...prev];
         });
@@ -116,9 +163,91 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      !examPollingEnabled ||
+      !['overview', 'exams', 'results', 'queries'].includes(activeTab)
+    ) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      if (refreshInProgressRef.current || realtimeService.isConnected()) return;
+      refreshInProgressRef.current = true;
+      const refresh = onRefreshExamData?.(user);
+      if (!refresh) {
+        refreshInProgressRef.current = false;
+        return;
+      }
+      void refresh.finally(() => {
+        refreshInProgressRef.current = false;
+      });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, examPollingEnabled, onRefreshExamData, user]);
+
   // Only published results belonging to this student
   const publishedResults = results.filter(
     r => (r.studentId === user.userId || r.studentId === user.id) && r.isPublished
+  );
+  const getExamCardState = (exam: ScheduledExam) => {
+    const latestAttempt = exam.studentAttempts?.[0] ||
+      (exam.studentAttemptId && exam.studentAttemptStatus
+        ? {
+            attemptId: exam.studentAttemptId,
+            status: exam.studentAttemptStatus,
+            resultPublished: Boolean(exam.resultPublished)
+          }
+        : undefined);
+    const result = latestAttempt
+      ? publishedResults.find(
+          item =>
+            item.studentId === user.userId &&
+            item.examId === exam.examId &&
+            item.attemptId === latestAttempt.attemptId
+        )
+      : undefined;
+    const status = latestAttempt?.status || (result ? 'EVALUATED' : undefined);
+    const isInProgress = status === 'IN_PROGRESS';
+    const isFinalized = !isInProgress && (isFinalizedAttempt(status) || Boolean(result));
+    const isEligible =
+      exam.canAttempt ??
+      ((exam.status === 'PUBLISHED' || exam.status === 'LIVE') &&
+        !latestAttempt &&
+        !result);
+
+    return {
+      latestAttempt,
+      result,
+      status,
+      isInProgress,
+      isFinalized,
+      canStart: !latestAttempt && !result && isEligible
+    };
+  };
+  const examHistory = exams;
+  const attemptedExamRows = exams.flatMap(exam =>
+    (exam.studentAttempts || (exam.studentAttemptId && exam.studentAttemptStatus
+      ? [{
+          attemptId: exam.studentAttemptId,
+          status: exam.studentAttemptStatus,
+          resultPublished: publishedResults.some(
+            result =>
+              result.studentId === user.userId &&
+              result.examId === exam.examId &&
+              result.attemptId === exam.studentAttemptId
+          )
+        }]
+      : []
+    )).map(attempt => ({
+      exam,
+      attempt,
+      result: publishedResults.find(
+        result =>
+          (result.studentId === user.userId || result.studentId === user.id) &&
+          result.examId === exam.examId &&
+          result.attemptId === attempt.attemptId
+      )
+    }))
   );
 
   const myQueries = queries.filter(
@@ -134,25 +263,29 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       : 100;
 
   const availableExams = exams.filter(
-    e =>
-      (e.status === 'PUBLISHED' || e.status === 'LIVE' || e.status === 'SCHEDULED') &&
-      e.studentAttemptStatus !== 'SUBMITTED' &&
-      e.studentAttemptStatus !== 'EVALUATED' &&
-      e.studentAttemptStatus !== 'TERMINATED' &&
-      e.studentAttemptStatus !== 'EXPIRED'
+    exam => {
+      const state = getExamCardState(exam);
+      return (
+        (exam.status === 'PUBLISHED' || exam.status === 'LIVE') &&
+        !state.isFinalized &&
+        (state.canStart || state.isInProgress)
+      );
+    }
   );
   const visibleAvailableExams = availableExams.filter(exam => {
+    const state = getExamCardState(exam);
     if (examListFilter === 'LIVE') return exam.status === 'LIVE';
-    if (examListFilter === 'IN_PROGRESS') return exam.studentAttemptStatus === 'IN_PROGRESS';
+    if (examListFilter === 'IN_PROGRESS') return state.isInProgress;
     return true;
   });
-
   const completedExams = exams.filter(
     e =>
       e.studentAttemptStatus === 'SUBMITTED' ||
+      e.studentAttemptStatus === 'AUTO_SUBMITTED' ||
       e.studentAttemptStatus === 'EVALUATED' ||
       e.studentAttemptStatus === 'TERMINATED' ||
       e.studentAttemptStatus === 'EXPIRED' ||
+      e.studentAttemptStatus === 'FORCE_SUBMITTED' ||
       e.status === 'ENDED' ||
       e.status === 'CLOSED' ||
       e.status === 'RESULT_PUBLISHED'
@@ -194,17 +327,57 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const submittedAttemptsCount = completedExams.filter(
     e =>
       e.studentAttemptStatus === 'SUBMITTED' ||
+      e.studentAttemptStatus === 'AUTO_SUBMITTED' ||
       e.studentAttemptStatus === 'EVALUATED' ||
+      e.studentAttemptStatus === 'FORCE_SUBMITTED' ||
       e.status === 'RESULT_PUBLISHED'
   ).length;
 
-  const proctoringStanding = proctoringEvents.some(
+  const ownProctoringEvents = proctoringEvents.filter(event =>
+    event.studentId === user.userId || event.studentId === user.id
+  );
+  const proctoringStanding = ownProctoringEvents.some(
     e => e.severity === 'HIGH' || e.severity === 'CRITICAL'
   )
     ? 'WARNED'
-    : proctoringEvents.length > 0
+    : ownProctoringEvents.length > 0
     ? 'MONITORED'
     : 'CLEAN';
+  const proctoringSummaryByExam = new Map<string, {
+    examId: string;
+    title: string;
+    subject: string;
+    eventCount: number;
+    latestTimestamp: string | null;
+  }>();
+  exams.forEach(exam => {
+    const examId = exam.examId || exam.id;
+    proctoringSummaryByExam.set(examId, {
+     examId,
+     title: exam.title || examId,
+     subject: exam.subject || exam.course || '—',
+     eventCount: 0,
+     latestTimestamp: null
+    });
+  });
+  ownProctoringEvents.forEach(event => {
+    const summary = proctoringSummaryByExam.get(event.examId);
+    if (!summary) return;
+    summary.eventCount += 1;
+    if (
+     !summary.latestTimestamp ||
+     new Date(event.timestamp).getTime() > new Date(summary.latestTimestamp).getTime()
+    ) {
+     summary.latestTimestamp = event.timestamp;
+    }
+  });
+  const proctoringExamSummaries = Array.from(proctoringSummaryByExam.values()).sort((first, second) =>
+    (second.latestTimestamp ? new Date(second.latestTimestamp).getTime() : 0) -
+    (first.latestTimestamp ? new Date(first.latestTimestamp).getTime() : 0)
+  );
+  const selectedExamProctoringEvents = ownProctoringEvents
+    .filter(event => event.examId === selectedProctoringExamId)
+    .sort((first, second) => new Date(second.timestamp).getTime() - new Date(first.timestamp).getTime());
 
   const { confirmAction, ConfirmModal } = useConfirmAction();
 
@@ -291,11 +464,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   };
 
   const handleRefresh = async () => {
-    if (!onRefreshData) return;
+    if (!onRefreshData || refreshInProgressRef.current) return;
+    refreshInProgressRef.current = true;
     setIsRefreshing(true);
     try {
-      await Promise.all([onRefreshData(), loadProctoring()]);
+      const [dataResult, proctoringResult] = await Promise.all([onRefreshData(), loadProctoring()]);
+      if (dataResult !== false && proctoringResult) setExamPollingEnabled(true);
     } finally {
+      refreshInProgressRef.current = false;
       setIsRefreshing(false);
     }
   };
@@ -425,12 +601,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               ) : (
                 <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
                   {exams.slice(0, 5).map(exam => {
-                    const isSubmitted =
-                      exam.studentAttemptStatus === 'SUBMITTED' ||
-                      exam.studentAttemptStatus === 'EVALUATED' ||
-                      exam.studentAttemptStatus === 'TERMINATED' ||
-                      exam.studentAttemptStatus === 'EXPIRED';
-                    const isInProgress = exam.studentAttemptStatus === 'IN_PROGRESS';
+                    const state = getExamCardState(exam);
                     return (
                       <div key={exam.id} className="py-3.5 flex items-center justify-between gap-3">
                         <div>
@@ -445,25 +616,48 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                             {exam.examId || exam.id} · {exam.subject} · {exam.durationMinutes} mins ·{' '}
                             {exam.totalMarks} marks
                           </p>
-                          {isInProgress && (
+                          {state.result && (
+                            <p className="text-[12px] text-slate-600 dark:text-slate-300 mt-1 tabular-nums">
+                              Score: {state.result.score} / {state.result.totalMarks ?? exam.totalMarks}
+                            </p>
+                          )}
+                          {state.isInProgress && (
                             <p className="text-[12px] text-amber-700 dark:text-amber-300 mt-1">
                               Exam {exam.title} — In Progress
                               {exam.activeAttemptId ? ` · Attempt ${exam.activeAttemptId}` : ''}
                             </p>
                           )}
                         </div>
-                        {isSubmitted ? (
-                          <StatusBadge status={exam.studentAttemptStatus || 'SUBMITTED'} />
+                        {state.isFinalized ? (
+                          <StatusBadge status={getStudentAttemptStatusLabel(state.status)} />
+                        ) : state.isInProgress ? (
+                          <>
+                            <StatusBadge status={getStudentAttemptStatusLabel(state.status)} />
+                            <button
+                              type="button"
+                              disabled={startingExamId === (exam.examId || exam.id)}
+                              onClick={() => handleLaunchExam(exam)}
+                              className="h-9 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[14px] font-medium inline-flex items-center gap-1.5"
+                            >
+                              <Play className="w-3.5 h-3.5" />
+                              Resume
+                            </button>
+                          </>
                         ) : (
-                          <button
-                            type="button"
-                            disabled={startingExamId === (exam.examId || exam.id)}
-                            onClick={() => handleLaunchExam(exam)}
-                            className="h-9 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[14px] font-medium inline-flex items-center gap-1.5"
-                          >
-                            <Play className="w-3.5 h-3.5" />
-                            {isInProgress ? 'Resume' : 'Start'}
-                          </button>
+                          <>
+                            <StatusBadge status="Not Attempted" />
+                            {state.canStart && (
+                              <button
+                                type="button"
+                                disabled={startingExamId === (exam.examId || exam.id)}
+                                onClick={() => handleLaunchExam(exam)}
+                                className="h-9 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[14px] font-medium inline-flex items-center gap-1.5"
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                                Start
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     );
@@ -560,101 +754,78 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Available Exams ({visibleAvailableExams.length})
               </h2>
-              <select
-                aria-label="Filter exams"
-                value={examListFilter}
-                onChange={event => setExamListFilter(event.target.value as typeof examListFilter)}
-                className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-              >
-                <option value="ALL">All available</option>
-                <option value="LIVE">Live</option>
-                <option value="IN_PROGRESS">In progress</option>
-              </select>
             </div>
 
           {visibleAvailableExams.length === 0 ? (
-            <EmptyState message={availableExams.length ? 'No exams match this filter.' : 'No exams yet.'} />
+            <EmptyState message="No exams available." />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="py-3.5 px-4 whitespace-nowrap">Exam ID</th>
-                    <th className="py-3.5 px-4">Title</th>
-                    <th className="py-3.5 px-4">Subject</th>
-                    <th className="py-3.5 px-4 whitespace-nowrap">Start</th>
-                    <th className="py-3.5 px-4 whitespace-nowrap">End</th>
-                    <th className="py-3.5 px-4 whitespace-nowrap">Duration</th>
-                    <th className="py-3.5 px-4 whitespace-nowrap">Status</th>
-                    <th className="py-3.5 px-4 text-right whitespace-nowrap">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {visibleAvailableExams.map(exam => {
-                    const isInProgress = exam.studentAttemptStatus === 'IN_PROGRESS';
-                    const exId = exam.examId || exam.id;
-                    return (
-                      <tr key={exId} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                        <td className="py-4 px-4 whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedExam(exam)}
-                            className="font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline tabular-nums"
-                          >
-                            {exId}
-                          </button>
-                        </td>
-                        <td className="py-4 px-4 font-medium text-slate-900 dark:text-white">
+            <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
+              {visibleAvailableExams.map(exam => {
+                const state = getExamCardState(exam);
+                const exId = exam.examId || exam.id;
+                return (
+                  <article
+                    key={exId}
+                    className="flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-mono text-[12px] font-medium text-slate-500 dark:text-slate-400 tabular-nums">
+                          {exId}
+                        </p>
+                        <h3 className="mt-1 truncate text-[15px] font-semibold text-slate-900 dark:text-white">
                           {exam.title}
-                          {isInProgress && (
-                            <span className="block mt-1 text-[12px] font-normal text-amber-700 dark:text-amber-300">
-                              In Progress{exam.activeAttemptId ? ` · Attempt ${exam.activeAttemptId}` : ''}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-4 px-4 text-slate-600 dark:text-slate-300">{exam.subject}</td>
-                        <td className="py-4 px-4 text-[14px] text-slate-500 whitespace-nowrap tabular-nums">
-                          {exam.scheduledDate} {exam.startTime}
-                        </td>
-                        <td className="py-4 px-4 text-[14px] text-slate-500 whitespace-nowrap tabular-nums">
-                          {exam.scheduledDate} {exam.endTime}
-                        </td>
-                        <td className="py-4 px-4 text-slate-600 dark:text-slate-300 whitespace-nowrap tabular-nums">
-                          {exam.durationMinutes} mins
-                        </td>
-                        <td className="py-4 px-4 whitespace-nowrap">
-                          <StatusBadge status={exam.status} />
-                        </td>
-                        <td className="py-4 px-4 text-right whitespace-nowrap space-x-2">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedExam(exam)}
-                            className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-[14px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1.5"
-                          >
-                            <Eye className="w-3.5 h-3.5" /> View
-                          </button>
-                          {exam.studentAttemptStatus === 'SUBMITTED' ||
-                          exam.studentAttemptStatus === 'EVALUATED' ||
-                          exam.studentAttemptStatus === 'TERMINATED' ||
-                          exam.studentAttemptStatus === 'EXPIRED' ? (
-                            <StatusBadge status={exam.studentAttemptStatus || 'SUBMITTED'} />
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={startingExamId === exId}
-                              onClick={() => handleLaunchExam(exam)}
-                              className="h-9 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[14px] font-medium inline-flex items-center gap-1.5"
-                            >
-                              <Play className="w-3.5 h-3.5" />
-                              {isInProgress ? 'Resume' : 'Start'}
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                        </h3>
+                      </div>
+                      <StatusBadge status={getStudentAttemptStatusLabel(state.status)} />
+                    </div>
+
+                    <p className="mt-2 truncate text-[13px] text-slate-600 dark:text-slate-300">
+                      {exam.subject}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500 dark:text-slate-400 tabular-nums">
+                      <span>{exam.durationMinutes} mins</span>
+                      <span>{exam.totalMarks} marks</span>
+                      {exam.scheduledDate && (
+                        <span>
+                          {exam.scheduledDate} · {exam.startTime}–{exam.endTime}
+                        </span>
+                      )}
+                    </div>
+                    {state.result && (
+                      <p className="mt-2 text-[13px] font-medium text-slate-700 dark:text-slate-200 tabular-nums">
+                        Score: {state.result.score} / {state.result.totalMarks ?? exam.totalMarks}
+                      </p>
+                    )}
+                    {state.isInProgress && exam.activeAttemptId && (
+                      <p className="mt-2 text-[12px] text-amber-700 dark:text-amber-300">
+                        Attempt {exam.activeAttemptId}
+                      </p>
+                    )}
+
+                    <div className="mt-auto flex items-center justify-end gap-2 border-t border-slate-100 pt-3 dark:border-slate-700">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedExam(exam)}
+                        className="h-9 rounded-lg border border-slate-200 px-3 text-[13px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                      >
+                        View
+                      </button>
+                      {(state.isInProgress || state.canStart) && (
+                        <button
+                          type="button"
+                          disabled={startingExamId === exId}
+                          onClick={() => handleLaunchExam(exam)}
+                          className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 text-[13px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          {state.isInProgress ? 'Resume' : 'Start'}
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           )}
         </div>
@@ -695,11 +866,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Exam History ({completedExams.length})
+                Exam History ({examHistory.length})
               </h2>
             </div>
 
-          {completedExams.length === 0 ? (
+          {examHistory.length === 0 ? (
             <EmptyState message="No exams yet." />
           ) : (
             <div className="overflow-x-auto">
@@ -710,37 +881,59 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                     <th className="py-3.5 px-4">Title</th>
                     <th className="py-3.5 px-4">Subject</th>
                     <th className="py-3.5 px-4 whitespace-nowrap">Duration</th>
-                    <th className="py-3.5 px-4 whitespace-nowrap">Status</th>
+                    <th className="py-3.5 px-4 whitespace-nowrap">Exam Status</th>
+                    <th className="py-3.5 px-4 whitespace-nowrap">Attempt Status</th>
                     <th className="py-3.5 px-4 whitespace-nowrap">Result Visibility</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {completedExams.map(exam => (
-                    <tr key={exam.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                      <td className="py-4 px-4 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedExam(exam)}
-                          className="font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline tabular-nums"
-                        >
-                          {exam.examId || exam.id}
-                        </button>
-                      </td>
-                      <td className="py-4 px-4 font-medium text-slate-900 dark:text-white">
-                        {exam.title}
-                      </td>
-                      <td className="py-4 px-4 text-slate-600 dark:text-slate-300">{exam.subject}</td>
-                      <td className="py-4 px-4 text-slate-600 dark:text-slate-300 tabular-nums">
-                        {exam.durationMinutes} mins
-                      </td>
-                      <td className="py-4 px-4">
-                        <StatusBadge status={exam.studentAttemptStatus || exam.status} />
-                      </td>
-                      <td className="py-4 px-4 text-[14px] font-medium text-slate-600 dark:text-slate-400">
-                        {exam.resultPublished ? 'Published' : 'Pending Faculty Publication'}
-                      </td>
-                    </tr>
-                  ))}
+                  {examHistory.map(exam => {
+                    const state = getExamCardState(exam);
+                    return (
+                      <tr key={exam.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                        <td className="py-4 px-4 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedExam(exam)}
+                            className="font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline tabular-nums"
+                          >
+                            {exam.examId || exam.id}
+                          </button>
+                        </td>
+                        <td className="py-4 px-4 font-medium text-slate-900 dark:text-white">
+                          {exam.title}
+                        </td>
+                        <td className="py-4 px-4 text-slate-600 dark:text-slate-300">
+                          {exam.subject}
+                        </td>
+                        <td className="py-4 px-4 text-slate-600 dark:text-slate-300 tabular-nums">
+                          {exam.durationMinutes} mins
+                        </td>
+                        <td className="py-4 px-4">
+                          <StatusBadge status={exam.status} />
+                        </td>
+                        <td className="py-4 px-4">
+                          {state.result && (
+                            <span className="block mb-1 text-[13px] text-slate-600 dark:text-slate-300 tabular-nums">
+                              Score: {state.result.score} / {state.result.totalMarks ?? exam.totalMarks}
+                            </span>
+                          )}
+                          <StatusBadge
+                            status={getStudentAttemptStatusLabel(state.status)}
+                          />
+                        </td>
+                        <td className="py-4 px-4 text-[14px] font-medium text-slate-600 dark:text-slate-400">
+                          {state.isInProgress
+                            ? 'In Progress'
+                            : state.result
+                            ? 'Published'
+                            : state.isFinalized
+                            ? 'Awaiting Publication'
+                            : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -783,80 +976,68 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Published Results ({publishedResults.length})
+                Exam Results ({attemptedExamRows.length})
               </h2>
             </div>
 
-            {publishedResults.length === 0 ? (
-              <EmptyState message="No results available." />
+            {attemptedExamRows.length === 0 ? (
+              <EmptyState message="No exam attempts yet." />
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                      <th className="py-3.5 px-4 whitespace-nowrap">Result ID</th>
+                      <th className="py-3.5 px-4 whitespace-nowrap">Exam ID / Attempt</th>
                       <th className="py-3.5 px-4">Exam</th>
-                      <th className="py-3.5 px-4">Student</th>
+                      <th className="py-3.5 px-4">Subject</th>
                       <th className="py-3.5 px-4 whitespace-nowrap">Score</th>
                       <th className="py-3.5 px-4 whitespace-nowrap">Percentage</th>
-                      <th className="py-3.5 px-4 whitespace-nowrap">Status</th>
-                      <th className="py-3.5 px-4 whitespace-nowrap">Published At</th>
-                      <th className="py-3.5 px-4 text-right whitespace-nowrap">Actions</th>
+                      <th className="py-3.5 px-4 whitespace-nowrap">Attempt Status</th>
+                      <th className="py-3.5 px-4 whitespace-nowrap">Result Status / Visibility</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                    {publishedResults.map(res => {
-                      const rId = res.resultId || res.id;
+                    {attemptedExamRows.map(({ exam, attempt, result }) => {
                       return (
-                        <tr key={rId} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                        <tr key={attempt.attemptId} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
                           <td className="py-4 px-4 whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedResult(res)}
-                              className="font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline tabular-nums"
-                            >
-                              {rId}
-                            </button>
+                            <span className="font-mono text-[14px] font-medium text-slate-700 dark:text-slate-300 tabular-nums">
+                              {exam.examId} · {attempt.attemptId}
+                            </span>
                           </td>
                           <td className="py-4 px-4 font-medium text-slate-900 dark:text-white">
-                            {res.examTitle || res.topic}
+                            {exam.title}
                           </td>
                           <td className="py-4 px-4 text-slate-600 dark:text-slate-300">
-                            {res.studentName || user.name}
+                            {exam.subject}
                           </td>
                           <td className="py-4 px-4 font-semibold text-slate-900 dark:text-white tabular-nums">
-                            {res.score} / {res.totalMarks || res.totalQuestions}
+                            {result
+                              ? `${result.score} / ${result.totalMarks ?? exam.totalMarks}`
+                              : '—'}
                           </td>
                           <td className="py-4 px-4 text-slate-700 dark:text-slate-300 tabular-nums">
-                            {res.percentage ?? res.accuracy ?? 0}%
+                            {result ? `${result.percentage ?? result.accuracy}%` : '—'}
                           </td>
                           <td className="py-4 px-4">
-                            <StatusBadge status={res.status || 'PUBLISHED'} />
+                            <StatusBadge status={getStudentAttemptStatusLabel(attempt.status)} />
                           </td>
                           <td className="py-4 px-4 text-[14px] text-slate-500 tabular-nums">
-                            {res.publishedAt
-                              ? new Date(res.publishedAt).toLocaleDateString()
-                              : res.date}
-                          </td>
-                          <td className="py-4 px-4 text-right whitespace-nowrap space-x-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedResult(res)}
-                              className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-[14px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center gap-1.5"
-                            >
-                              <Eye className="w-3.5 h-3.5" /> View
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setQueryExamId(res.examId || '');
-                                setQueryTopic(res.examTitle || res.topic);
-                                setShowQueryModal(true);
-                              }}
-                              className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-[14px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 inline-flex items-center"
-                            >
-                              Raise Query
-                            </button>
+                            <StatusBadge
+                              status={
+                                result?.status ||
+                                (isFinalizedAttempt(attempt.status)
+                                  ? 'Awaiting Publication'
+                                  : attempt.status === 'IN_PROGRESS'
+                                  ? 'In Progress'
+                                  : 'Not Published')
+                              }
+                            />
+                            {result?.publishedAt && (
+                              <span className="block mt-1">
+                                {new Date(result.publishedAt).toLocaleDateString()}
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );
@@ -871,16 +1052,23 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       )}
 
       {activeTab === 'analytics' && (
-        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
-          <h2 className="mb-2 text-[20px] font-semibold text-slate-900 dark:text-white">
-            Performance trend
-          </h2>
-          {publishedResults.length < 2 ? (
-            <EmptyState message="Complete more exams to see your performance trend." />
-          ) : (
-            <PerformanceTrendChart data={[...publishedResults].reverse()} />
-          )}
-        </section>
+        <div className="space-y-5">
+          <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
+            <h2 className="mb-2 text-[20px] font-semibold text-slate-900 dark:text-white">
+              Performance trend
+            </h2>
+            {publishedResults.length < 2 ? (
+              <EmptyState message="Complete more exams to see your performance trend." />
+            ) : (
+              <PerformanceTrendChart data={[...publishedResults].reverse()} />
+            )}
+          </section>
+          <OverallPerformanceSection
+            results={publishedResults}
+            studentId={user.userId || user.id}
+            studentRankings={studentRankings}
+          />
+        </div>
       )}
 
       {/* 5. QUERIES TAB */}
@@ -1005,8 +1193,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
             />
             <KpiCard
               label="Warning Count"
-              value={proctoringEvents.length}
-              subValue={`${proctoringEvents.filter(e => e.severity === 'HIGH' || e.severity === 'CRITICAL').length} High / Critical alerts`}
+              value={ownProctoringEvents.length}
+              subValue={`${ownProctoringEvents.filter(e => e.severity === 'HIGH' || e.severity === 'CRITICAL').length} High / Critical alerts`}
               icon={<Shield className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
             />
             <KpiCard
@@ -1024,55 +1212,68 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           </div>
 
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-6">
-            <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-              Proctoring Audit Trail
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
+                Proctoring Audit Trail ({ownProctoringEvents.length})
+              </h2>
+            </div>
 
             {proctoringError && <ErrorState message={proctoringError} onRetry={loadProctoring} />}
 
-          {isLoadingProctoring ? (
-            <LoadingState message="Loading proctoring events..." />
-          ) : proctoringEvents.length === 0 ? (
-            <EmptyState message="No proctoring events." />
-          ) : (
-            <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="py-3.5 px-4">Event ID</th>
-                    <th className="py-3.5 px-4">Exam</th>
-                    <th className="py-3.5 px-4">Type</th>
-                    <th className="py-3.5 px-4">Severity</th>
-                    <th className="py-3.5 px-4">Details</th>
-                    <th className="py-3.5 px-4">Timestamp</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {proctoringEvents.map(ev => (
-                    <tr key={ev.eventId}>
-                      <td className="py-4 px-4 font-mono text-[14px] text-slate-500 tabular-nums">{ev.eventId}</td>
-                      <td className="py-4 px-4 font-mono text-[14px] text-blue-600 dark:text-blue-400 tabular-nums">
-                        {ev.examId}
-                      </td>
-                      <td className="py-4 px-4 font-medium text-slate-900 dark:text-white">
-                        {ev.eventType}
-                      </td>
-                      <td className="py-4 px-4">
-                        <StatusBadge status={ev.severity} />
-                      </td>
-                      <td className="py-4 px-4 text-slate-600 dark:text-slate-300">
-                        {ev.details || ev.message}
-                      </td>
-                      <td className="py-4 px-4 text-[14px] text-slate-500 tabular-nums">
-                        {ev.timestamp ? new Date(ev.timestamp).toLocaleString() : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+            {isLoadingProctoring ? (
+              <LoadingState message="Loading proctoring events..." />
+            ) : proctoringExamSummaries.length === 0 ? (
+                <EmptyState message="No proctoring events recorded" />
+              ) : (
+                <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
+                        <th className="py-3.5 px-4">Exam ID</th>
+                        <th className="py-3.5 px-4">Exam Title</th>
+                        <th className="py-3.5 px-4">Subject</th>
+                        <th className="py-3.5 px-4">Events</th>
+                        <th className="py-3.5 px-4">Latest Event</th>
+                        <th className="py-3.5 px-4"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
+                      {proctoringExamSummaries.map(summary => (
+                        <tr key={summary.examId} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                          <td className="py-3.5 px-4 font-mono text-blue-600 dark:text-blue-400">{summary.examId}</td>
+                          <td className="py-3.5 px-4 font-medium text-slate-900 dark:text-white">{summary.title}</td>
+                          <td className="py-3.5 px-4 text-slate-600 dark:text-slate-300">{summary.subject}</td>
+                          <td className="py-3.5 px-4 text-slate-600 dark:text-slate-300">{summary.eventCount}</td>
+                          <td className="py-3.5 px-4 text-sm text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                            {summary.latestTimestamp ? new Date(summary.latestTimestamp).toLocaleString() : '—'}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedProctoringExamId(summary.examId)}
+                              className="text-sm font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                            >
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                </table>
+              </div>
+            )}
         </div>
+        {selectedProctoringExamId && (
+          <ProctoringExamInsightsModal
+            exam={exams.find(exam => exam.examId === selectedProctoringExamId)}
+            examId={selectedProctoringExamId}
+            events={selectedExamProctoringEvents}
+            results={results}
+            studentId={user.userId || user.id}
+            isStudent
+            onClose={() => setSelectedProctoringExamId(null)}
+          />
+        )}
         </div>
       )}
 

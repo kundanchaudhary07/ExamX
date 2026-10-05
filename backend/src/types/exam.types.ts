@@ -104,4 +104,10 @@ export interface SafeStudentExamDto {
   assignedAt?: Date;
   attemptsUsed?: number;
   canAttempt?: boolean;
+  studentAttemptId?: string;
+  studentAttempts?: Array<{
+    attemptId: string;
+    status: string;
+    resultPublished: boolean;
+  }>;
 }

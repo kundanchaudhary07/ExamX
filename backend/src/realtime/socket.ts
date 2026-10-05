@@ -20,6 +20,8 @@ export type RealtimeEventName =
   | 'exam.started'
   | 'exam.completed'
   | 'exam.cancelled'
+  | 'exam.deleted'
+  | 'exam.forceEnded'
   | 'question.created'
   | 'question.updated'
   | 'question.deleted'
@@ -147,7 +149,8 @@ export function initSocketServer(httpServer: http.Server): SocketIOServer {
           ExamAssignment.find({ studentId: user.userId }).select('examId').lean(),
           Exam.find({
             $or: [{ assignedStudentIds: user.userId }, { assignedStudents: user.userId }],
-            status: { $in: ['PUBLISHED', 'LIVE', 'SCHEDULED', 'ENDED'] }
+            status: { $in: ['PUBLISHED', 'LIVE', 'SCHEDULED', 'ENDED'] },
+            deleting: { $ne: true }
           })
             .select('examId')
             .lean()
@@ -183,15 +186,15 @@ export function initSocketServer(httpServer: http.Server): SocketIOServer {
         }
         const cleanExamId = examId.trim();
 
-        if (user.role === 'ADMIN') {
-          socket.join(`exam:${cleanExamId}`);
-          ack?.({ ok: true });
+        const exam = await Exam.findOne({ examId: cleanExamId, deleting: { $ne: true } }).lean();
+        if (!exam) {
+          ack?.({ ok: false, error: 'Exam not found' });
           return;
         }
 
-        const exam = await Exam.findOne({ examId: cleanExamId }).lean();
-        if (!exam) {
-          ack?.({ ok: false, error: 'Exam not found' });
+        if (user.role === 'ADMIN') {
+          socket.join(`exam:${cleanExamId}`);
+          ack?.({ ok: true });
           return;
         }
 
@@ -314,6 +317,11 @@ export function emitExamEvent<T = any>(
   ];
 
   emitToRooms(rooms, event, data, actorId);
+}
+
+export function leaveExamRoom(examId: string): void {
+  const room = `exam:${examId}`;
+  if (ioInstance) void ioInstance.in(room).socketsLeave(room);
 }
 
 export function emitNotification(

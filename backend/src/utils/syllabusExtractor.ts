@@ -4,6 +4,7 @@ import mammoth from 'mammoth';
 import { extractText } from 'unpdf';
 
 const DEFAULT_MAX_SIZE_MB = 10;
+const MAX_EXTRACTED_SYLLABUS_CHARS = 30_000;
 
 export function getMaxSyllabusFileSizeBytes(): number {
   const configuredMb = Number(process.env.SYLLABUS_MAX_FILE_SIZE_MB);
@@ -46,15 +47,21 @@ function createSyllabusError(message: string, statusCode = 400): Error {
 }
 
 function sanitizeExtractedText(raw: string): string {
-  return raw
+  const text = raw
     .replace(/\u0000/g, '')
     .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
-    .trim()
-    .slice(0, 30000);
+    .trim();
+  if (text.length > MAX_EXTRACTED_SYLLABUS_CHARS) {
+    throw createSyllabusError(
+      `Extracted syllabus exceeds the maximum supported text length (${MAX_EXTRACTED_SYLLABUS_CHARS} characters). Split it into smaller sections and upload again.`,
+      413
+    );
+  }
+  return text;
 }
 
 /**

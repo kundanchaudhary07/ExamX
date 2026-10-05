@@ -36,6 +36,25 @@ router.get(
 
 // Student's own published results
 router.get(
+  '/my-rankings',
+  requireRole('STUDENT'),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const rankings = await ResultService.getStudentRankings(
+        req.query.examId as string | undefined,
+        req.user!
+      );
+      res.status(200).json({
+        success: true,
+        data: { rankings }
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
   '/my',
   requireRole('STUDENT'),
   async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {

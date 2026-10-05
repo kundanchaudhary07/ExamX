@@ -102,11 +102,96 @@ export interface StudentDetailsData {
     averagePercentage?: number;
     publishedResultsCount?: number;
     queriesCount?: number;
+    examsAttempted?: number;
+    examsNotAttempted?: number;
+    examsPassed?: number;
+    examsFailed?: number;
+    averageScore?: number | null;
+    highestScore?: number | null;
+    lowestScore?: number | null;
+    passRate?: number | null;
+    overallRank?: { rank: number; totalRankedStudents: number } | null;
+    totalRankedStudents?: number;
   };
   recentExams: ScheduledExam[];
   results: StudentResult[];
   queries: StudentQuery[];
   proctoringEvents?: ProctoringEventRecord[];
+  examHistory?: StudentExamHistoryItem[];
+  performance?: {
+    subjectBreakdown: Array<{ subject: string; averagePercentage: number; exams: number }>;
+    overallRank: { rank: number; totalRankedStudents: number } | null;
+  };
+  proctoringSummary?: StudentProctoringSummary;
+  assistance?: StudentAssistanceSummary;
+}
+
+export interface StudentExamHistoryItem {
+  examId: string;
+  title: string;
+  subject: string;
+  examDate?: string;
+  attemptStatus: string;
+  submissionStatus: string;
+  score: number | null;
+  totalMarks: number | null;
+  percentage: number | null;
+  passed: boolean | null;
+  resultStatus: string | null;
+  resultVisibility: 'PUBLISHED' | 'UNPUBLISHED' | 'NOT_AVAILABLE';
+  examRank: { rank: number; totalRankedStudents: number } | null;
+  proctoring: {
+    totalEvents: number;
+    warnings: number;
+    low: number;
+    medium: number;
+    high: number;
+    critical: number;
+    eventTypes: Record<string, number>;
+  };
+}
+
+export interface StudentProctoringSummary {
+  totalMonitoredExams: number;
+  totalEvents: number;
+  totalWarnings: number;
+  low: number;
+  medium: number;
+  high: number;
+  critical: number;
+  examsWithWarnings: number;
+  eventTypes: Record<string, number>;
+  byExam: Array<{
+    examId: string;
+    title: string;
+    totalEvents: number;
+    warnings: number;
+    low: number;
+    medium: number;
+    high: number;
+    critical: number;
+    eventTypes: Record<string, number>;
+  }>;
+}
+
+export interface StudentAssistanceSummary {
+  total: number;
+  approved: number;
+  rejected: number;
+  pending: number;
+  blockedAttempts: number;
+  blockHistory: Array<{
+    requestId: string;
+    examId: string;
+    examTitle: string;
+    attemptId: string;
+    status: 'PENDING' | 'APPROVED' | 'REJECTED';
+    reason: string;
+    blockedAt: string;
+    unblockedAt: string | null;
+    reviewedAt: string | null;
+    remarks: string;
+  }>;
 }
 
 export interface ChatMessage {
@@ -286,7 +371,14 @@ export interface ExamAttemptRecord {
   startedAt: string;
   expiresAt: string;
   submittedAt?: string | null;
-  status: 'IN_PROGRESS' | 'SUBMITTED' | 'EXPIRED' | 'EVALUATED' | 'TERMINATED';
+  status:
+    | 'IN_PROGRESS'
+    | 'SUBMITTED'
+    | 'AUTO_SUBMITTED'
+    | 'EXPIRED'
+    | 'EVALUATED'
+    | 'TERMINATED'
+    | 'FORCE_SUBMITTED';
   answers: ExamAnswerRecord[];
   currentQuestionIndex: number;
   score: number;
@@ -507,6 +599,13 @@ export interface ScheduledExam {
   assignedStudentsCount?: number;
   attemptStatus?: string;
   studentAttemptStatus?: string;
+  studentAttemptId?: string;
+  studentAttempts?: Array<{
+    attemptId: string;
+    status: string;
+    resultPublished: boolean;
+  }>;
+  canAttempt?: boolean;
   resultPublished?: boolean;
   attemptCount?: number;
   activeAttemptId?: string | null;

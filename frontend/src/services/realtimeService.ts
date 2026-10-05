@@ -15,6 +15,8 @@ export type RealtimeEventName =
   | 'exam.started'
   | 'exam.completed'
   | 'exam.cancelled'
+  | 'exam.deleted'
+  | 'exam.forceEnded'
   | 'question.created'
   | 'question.updated'
   | 'question.deleted'

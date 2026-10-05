@@ -19,7 +19,7 @@ router.post('/', ExamController.createExam);
 router.get('/', ExamController.getExams);
 router.get('/:examId', ExamController.getExamById);
 router.patch('/:examId', ExamController.updateExam);
-router.delete('/:examId', ExamController.deleteExam);
+router.delete('/:examId', requireRole('ADMIN'), ExamController.deleteExam);
 router.patch('/:examId/status', ExamController.updateExamStatus);
 router.post('/:examId/questions', ExamController.attachQuestions);
 router.patch('/:examId/questions/:questionId', ExamController.updateExamQuestion);

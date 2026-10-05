@@ -39,8 +39,8 @@ export const ADMIN_NAV_ITEMS: NavItem[] = [
   { id: 'exams', label: 'Exams', icon: FileText },
   { id: 'questions', label: 'Question Bank', icon: BookOpen },
   { id: 'results', label: 'Results', icon: Award },
-  { id: 'analytics', label: 'Analytics', icon: BarChart2 },
   { id: 'proctoring', label: 'Proctoring', icon: Shield },
+  { id: 'monitoring_history', label: 'Monitoring History', icon: History },
   { id: 'queries', label: 'Queries', icon: MessageSquare },
   { id: 'audit', label: 'Audit Logs', icon: ClipboardList },
   { id: 'settings', label: 'Settings', icon: Settings }
@@ -53,9 +53,9 @@ export const TEACHER_NAV_ITEMS: NavItem[] = [
   { id: 'questions', label: 'Question Bank', icon: BookOpen },
   { id: 'ai_generator', label: 'AI Question Generation', icon: Sparkles },
   { id: 'monitoring', label: 'Exam Monitoring', icon: Shield },
+  { id: 'monitoring_history', label: 'Monitoring History', icon: History },
   { id: 'results', label: 'Results', icon: Award },
   { id: 'queries', label: 'Queries', icon: MessageSquare },
-  { id: 'analytics', label: 'Analytics', icon: BarChart2 },
   { id: 'profile', label: 'Profile', icon: UserIcon }
 ];
 

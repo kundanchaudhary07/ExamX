@@ -7,7 +7,9 @@ import { StudentQuery } from '../models/StudentQuery';
 import { AuditLog } from '../models/AuditLog';
 import { ExamAttempt } from '../models/ExamAttempt';
 import { ExamAssignment } from '../models/ExamAssignment';
-import { hashPassword } from '../utils/password';
+import { ProctoringEvent } from '../models/ProctoringEvent';
+import { UnblockRequest } from '../models/UnblockRequest';
+import { createInitialPasswordCredential, hashPassword } from '../utils/password';
 import { JwtUserPayload, UserStatus } from '../types/auth.types';
 import { logger } from '../utils/logger';
 import { AuditService } from './audit.service';
@@ -65,11 +67,9 @@ export class UserService {
 
     // 2. Authoritative Backend Generation of Initial Password (Name@DOB-Year)
     const initialPlainPassword = generateInitialPassword(data.name, parsedYear);
-
-    // 3. Immediately Hash with bcrypt
     const passwordHash = await hashPassword(initialPlainPassword);
 
-    // 4. Persist in MongoDB (strictly only passwordHash, never plaintext password)
+    // 3. Persist in MongoDB (strictly only passwordHash, never plaintext password)
     const teacher = await User.create({
       userId: teacherId,
       name: data.name.trim(),
@@ -381,10 +381,7 @@ export class UserService {
 
     // 1. Authoritative Backend Generation of Student ID (^1261[0-9]{4}$)
     // 2. Authoritative Backend Generation of Initial Password (Name@DOB-Year)
-    const initialPlainPassword = generateInitialPassword(data.name, parsedYear);
-
-    // 3. Immediately Hash with bcrypt
-    const passwordHash = await hashPassword(initialPlainPassword);
+    const initialCredential = await createInitialPasswordCredential(data.name, parsedYear);
 
     // 4. Strict Ownership: Teacher-created students are assigned to that teacher
     const rawAssigned =
@@ -407,7 +404,7 @@ export class UserService {
         phone: typeof data.phone === 'string' ? data.phone.trim() : '',
         dob: typeof data.dob === 'string' ? data.dob.trim() : String(parsedYear),
         dobYear: parsedYear,
-        passwordHash,
+        passwordHash: initialCredential.passwordHash,
         role: 'STUDENT',
         status: 'ACTIVE',
         enrollmentNo:
@@ -477,11 +474,11 @@ export class UserService {
       student: userObj,
       initialCredentials: {
         userId: student.userId,
-        temporaryPassword: initialPlainPassword
+        temporaryPassword: initialCredential.password
       },
       credentials: {
         userId: student.userId,
-        password: initialPlainPassword
+        password: initialCredential.password
       }
     };
   }
@@ -617,44 +614,194 @@ export class UserService {
       new Set([...(student.managedBy || []), ...(student.teacherIds || [])])
     );
 
-    const [teachers, assignments, attempts, results, queries] = await Promise.all([
+    const visibleResultStatuses = ['PUBLISHED', 'QUERIED', 'REVISED'] as const;
+    const [teachers, assignments, attempts, allResults, queries, unblockRequests, proctoringGroups, overallRankRows] = await Promise.all([
       User.find({ role: 'TEACHER', userId: { $in: teacherIds } }).select('userId name department').lean(),
       ExamAssignment.find({ studentId: resolvedStudentId }).select('examId').lean(),
       ExamAttempt.find({ studentId: resolvedStudentId }).sort({ createdAt: -1 }).lean(),
-      Result.find(
-        requester.role === 'STUDENT'
-          ? { studentId: resolvedStudentId, status: { $in: ['PUBLISHED', 'QUERIED', 'REVISED'] } }
-          : { studentId: resolvedStudentId }
-      )
-        .sort({ createdAt: -1 })
-        .lean(),
-      StudentQuery.find({ studentId: resolvedStudentId }).sort({ createdAt: -1 }).lean()
+      Result.find({ studentId: resolvedStudentId }).sort({ submittedAt: -1, _id: -1 }).lean(),
+      StudentQuery.find({ studentId: resolvedStudentId }).sort({ createdAt: -1 }).lean(),
+      UnblockRequest.find({ studentId: resolvedStudentId }).sort({ createdAt: -1 }).lean(),
+      ProctoringEvent.aggregate([
+        { $match: { studentId: resolvedStudentId } },
+        {
+          $group: {
+            _id: { examId: '$examId', eventType: '$eventType', severity: '$severity' },
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      Result.aggregate([
+        { $match: { status: { $in: visibleResultStatuses } } },
+        { $sort: { submittedAt: -1, _id: -1 } },
+        {
+          $group: {
+            _id: { studentId: '$studentId', examId: '$examId' },
+            percentage: { $first: '$percentage' }
+          }
+        },
+        {
+          $group: {
+            _id: '$_id.studentId',
+            averagePercentage: { $avg: '$percentage' }
+          }
+        }
+      ])
     ]);
 
-    const assignedExamIds = assignments.map(a => a.examId);
+    const visibleResultStatusSet = new Set<string>(visibleResultStatuses);
+    const results = allResults.filter(result => visibleResultStatusSet.has(result.status));
+    const assignedExamIds = Array.from(new Set([
+      ...assignments.map(a => a.examId),
+      ...attempts.map(attempt => attempt.examId),
+      ...results.map(result => result.examId)
+    ]));
     const assignedExamsDocs = await Exam.find({
       $or: [
         { examId: { $in: assignedExamIds } },
         { assignedStudents: resolvedStudentId },
         { assignedStudentIds: resolvedStudentId }
       ],
-      status: { $ne: 'ARCHIVED' }
+      deleting: { $ne: true }
     })
       .sort({ createdAt: -1 })
       .lean();
 
-    const completedExamIds = new Set(
-      attempts
-        .filter(a => ['SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED'].includes(a.status))
-        .map(a => a.examId)
-    );
+    const latestAttemptByExam = new Map<string, typeof attempts[number]>();
+    for (const attempt of attempts) {
+      if (!latestAttemptByExam.has(attempt.examId)) latestAttemptByExam.set(attempt.examId, attempt);
+    }
+    const latestResultByExam = new Map<string, typeof results[number]>();
+    for (const result of results) {
+      if (!latestResultByExam.has(result.examId)) latestResultByExam.set(result.examId, result);
+    }
 
     const assignedCount = assignedExamsDocs.length;
-    const completedCount = assignedExamsDocs.filter(e => completedExamIds.has(e.examId)).length;
-    const pendingCount = Math.max(0, assignedCount - completedCount);
-    const publishedResultsCount = results.filter(r =>
-      ['PUBLISHED', 'QUERIED', 'REVISED'].includes(r.status)
-    ).length;
+    const attemptedExamIds = new Set(attempts.map(attempt => attempt.examId));
+    const completedExamIds = new Set(
+      attempts
+        .filter(attempt =>
+          ['SUBMITTED', 'AUTO_SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED', 'FORCE_SUBMITTED']
+            .includes(attempt.status)
+        )
+        .map(attempt => attempt.examId)
+    );
+    const publishedResults = Array.from(latestResultByExam.values()).filter(result =>
+      Number.isFinite(Number(result.percentage))
+    );
+    const percentages = publishedResults.map(result => Number(result.percentage));
+    const passedCount = publishedResults.filter(result => result.passed).length;
+
+    const rankedExamIds = publishedResults.map(result => result.examId);
+    const peerExamResults = rankedExamIds.length
+      ? await Result.aggregate([
+          { $match: { examId: { $in: rankedExamIds }, status: { $in: visibleResultStatuses } } },
+          { $sort: { submittedAt: -1, _id: -1 } },
+          {
+            $group: {
+              _id: { studentId: '$studentId', examId: '$examId' },
+              score: { $first: '$score' }
+            }
+          }
+        ])
+      : [];
+    const ranksByExam = new Map<string, { rank: number; totalRankedStudents: number }>();
+    for (const result of publishedResults) {
+      const ranked = peerExamResults.filter(peer =>
+        peer._id.examId === result.examId && Number.isFinite(Number(peer.score))
+      );
+      ranksByExam.set(result.examId, {
+        rank: 1 + ranked.filter(peer => Number(peer.score) > Number(result.score)).length,
+        totalRankedStudents: ranked.length
+      });
+    }
+
+    const ownOverall = overallRankRows.find(row => row._id === resolvedStudentId);
+    const ownAverage = ownOverall && Number.isFinite(Number(ownOverall.averagePercentage))
+      ? Number(ownOverall.averagePercentage)
+      : null;
+    const overallRank = ownAverage === null
+      ? null
+      : {
+          rank: 1 + overallRankRows.filter(row =>
+            Number(row.averagePercentage) > ownAverage
+          ).length,
+          totalRankedStudents: overallRankRows.length
+        };
+
+    const proctoringByExam = new Map<string, {
+      totalEvents: number;
+      warnings: number;
+      low: number;
+      medium: number;
+      high: number;
+      critical: number;
+      eventTypes: Record<string, number>;
+    }>();
+    const proctoringEventTypes: Record<string, number> = {};
+    const nonWarningTypes = new Set([
+      'SCREENSHOT_ATTEMPT', 'WINDOW_FOCUS', 'CAMERA_CONNECTED', 'FACE_DETECTED', 'FACE_STATUS'
+    ]);
+    for (const group of proctoringGroups) {
+      const examId = String(group._id.examId);
+      const aggregate = proctoringByExam.get(examId) || {
+        totalEvents: 0, warnings: 0, low: 0, medium: 0, high: 0, critical: 0, eventTypes: {}
+      };
+      const count = Number(group.count) || 0;
+      aggregate.totalEvents += count;
+      if (!nonWarningTypes.has(group._id.eventType)) aggregate.warnings += count;
+      if (group._id.severity === 'LOW') aggregate.low += count;
+      if (group._id.severity === 'MEDIUM') aggregate.medium += count;
+      if (group._id.severity === 'HIGH') aggregate.high += count;
+      if (group._id.severity === 'CRITICAL') aggregate.critical += count;
+      aggregate.eventTypes[group._id.eventType] = (aggregate.eventTypes[group._id.eventType] || 0) + count;
+      proctoringEventTypes[group._id.eventType] = (proctoringEventTypes[group._id.eventType] || 0) + count;
+      proctoringByExam.set(examId, aggregate);
+    }
+
+    const blockHistory = unblockRequests.map(request => ({
+      requestId: request.requestId,
+      examId: request.examId,
+      examTitle: request.examTitle,
+      attemptId: request.attemptId,
+      status: request.status,
+      reason: request.reason,
+      blockedAt: request.createdAt,
+      unblockedAt: request.status === 'APPROVED' ? request.reviewedAt || null : null,
+      reviewedAt: request.reviewedAt || null,
+      remarks: request.remarks || ''
+    }));
+    const assistanceCounts = {
+      total: unblockRequests.length,
+      approved: unblockRequests.filter(request => request.status === 'APPROVED').length,
+      rejected: unblockRequests.filter(request => request.status === 'REJECTED').length,
+      pending: unblockRequests.filter(request => request.status === 'PENDING').length
+    };
+    const history = assignedExamsDocs.map(exam => {
+      const attempt = latestAttemptByExam.get(exam.examId);
+      const result = latestResultByExam.get(exam.examId);
+      const rank = result ? ranksByExam.get(exam.examId) || null : null;
+      return {
+        examId: exam.examId,
+        title: exam.title,
+        subject: exam.subject,
+        examDate: exam.startAt || exam.startDateTime || exam.createdAt,
+        attemptStatus: attempt?.status || 'NOT_ATTEMPTED',
+        submissionStatus: attempt?.status || 'NOT_ATTEMPTED',
+        score: result?.score ?? null,
+        totalMarks: result?.totalMarks ?? null,
+        percentage: result?.percentage ?? null,
+        passed: result ? Boolean(result.passed) : null,
+        resultStatus: allResults.find(item => item.examId === exam.examId)?.status || null,
+        resultVisibility: result ? 'PUBLISHED' : allResults.some(item => item.examId === exam.examId)
+          ? 'UNPUBLISHED'
+          : 'NOT_AVAILABLE',
+        examRank: rank,
+        proctoring: proctoringByExam.get(exam.examId) || {
+          totalEvents: 0, warnings: 0, low: 0, medium: 0, high: 0, critical: 0, eventTypes: {}
+        }
+      };
+    });
 
     const studentObj: any = student.toJSON();
     studentObj.assignedTeachers = teachers.map(t => ({
@@ -668,18 +815,71 @@ export class UserService {
       student: studentObj,
       kpis: {
         assignedExams: assignedCount,
-        completedExams: completedCount,
-        pendingExams: pendingCount,
-        publishedResults: publishedResultsCount
+        completedExams: completedExamIds.size,
+        pendingExams: Math.max(0, assignedCount - completedExamIds.size),
+        publishedResults: publishedResults.length,
+        examsAttempted: attemptedExamIds.size,
+        examsNotAttempted: Math.max(0, assignedCount - attemptedExamIds.size),
+        examsPassed: passedCount,
+        examsFailed: Math.max(0, publishedResults.length - passedCount),
+        averageScore: percentages.length
+          ? percentages.reduce((sum, value) => sum + value, 0) / percentages.length
+          : null,
+        highestScore: percentages.length ? Math.max(...percentages) : null,
+        lowestScore: percentages.length ? Math.min(...percentages) : null,
+        passRate: publishedResults.length ? (passedCount / publishedResults.length) * 100 : null,
+        overallRank,
+        totalRankedStudents: overallRank?.totalRankedStudents || 0
       },
       recentExams: assignedExamsDocs.map(ex => {
-        const latestAttempt = attempts.find(a => a.examId === ex.examId);
+        const latestAttempt = latestAttemptByExam.get(ex.examId);
         return {
           ...ex,
           id: ex.examId,
           attemptStatus: latestAttempt?.status || 'NOT_STARTED'
         };
       }),
+      examHistory: history,
+      performance: {
+        subjectBreakdown: Array.from(
+          publishedResults.reduce((subjects, result) => {
+            const subject = result.subject || assignedExamsDocs.find(exam => exam.examId === result.examId)?.subject || 'Other';
+            const scores = subjects.get(subject) || [];
+            scores.push(Number(result.percentage));
+            subjects.set(subject, scores);
+            return subjects;
+          }, new Map<string, number[]>())
+        ).map(([subject, scores]) => ({
+          subject,
+          averagePercentage: scores.reduce((sum, score) => sum + score, 0) / scores.length,
+          exams: scores.length
+        })),
+        overallRank
+      },
+      proctoringSummary: {
+        totalMonitoredExams: proctoringByExam.size,
+        totalEvents: Array.from(proctoringByExam.values()).reduce((sum, item) => sum + item.totalEvents, 0),
+        totalWarnings: Array.from(proctoringByExam.values()).reduce((sum, item) => sum + item.warnings, 0),
+        low: Array.from(proctoringByExam.values()).reduce((sum, item) => sum + item.low, 0),
+        medium: Array.from(proctoringByExam.values()).reduce((sum, item) => sum + item.medium, 0),
+        high: Array.from(proctoringByExam.values()).reduce((sum, item) => sum + item.high, 0),
+        critical: Array.from(proctoringByExam.values()).reduce((sum, item) => sum + item.critical, 0),
+        examsWithWarnings: Array.from(proctoringByExam.values()).filter(item => item.warnings > 0).length,
+        eventTypes: proctoringEventTypes,
+        byExam: history.filter(item => item.proctoring.totalEvents > 0).map(item => ({
+          examId: item.examId,
+          title: item.title,
+          ...item.proctoring
+        }))
+      },
+      assistance: {
+        ...assistanceCounts,
+        blockedAttempts: new Set([
+          ...unblockRequests.map(request => request.attemptId),
+          ...attempts.filter(attempt => attempt.suspended).map(attempt => attempt.attemptId)
+        ]).size,
+        blockHistory
+      },
       results,
       queries
     };
@@ -691,6 +891,10 @@ export class UserService {
       ...details.student,
       kpis: details.kpis,
       recentExams: details.recentExams,
+      examHistory: details.examHistory,
+      performance: details.performance,
+      proctoringSummary: details.proctoringSummary,
+      assistance: details.assistance,
       results: details.results,
       queries: details.queries
     };
@@ -913,4 +1117,3 @@ export class UserService {
     return this.updateStudent(targetUserId, { status }, requester);
   }
 }
-

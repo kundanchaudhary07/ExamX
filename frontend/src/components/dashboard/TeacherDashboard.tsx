@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   User,
   StudentResult,
@@ -14,7 +14,8 @@ import {
   ExamAttemptRecord,
   AssistanceRequestRecord
 } from '../../types';
-import { TopicMasteryChart } from '../Charts';
+import { ProctoringExamInsightsModal } from './ProctoringExamInsightsModal';
+import StudentAssessmentSections from './StudentAssessmentSections';
 import { TeacherExamScheduler } from './TeacherExamScheduler';
 import {
   SUBJECTS,
@@ -25,7 +26,12 @@ import {
   SECTIONS
 } from '../../constants';
 import { generateQuestionsWithAI } from '../../services/questionGenerationService';
-import { dbService, mapBackendUserToSystemUser } from '../../services/dbService';
+import {
+  dbService,
+  mapBackendQueryToFrontend,
+  mapBackendResultToFrontend,
+  mapBackendUserToSystemUser
+} from '../../services/dbService';
 import { CreatableSubjectCombobox } from '../common/CreatableSubjectCombobox';
 import { AiGenerationBatchCards } from './AiGenerationBatchCards';
 import { realtimeService } from '../../services/realtimeService';
@@ -60,7 +66,6 @@ import {
   Shield,
   BookOpen,
   Sparkles,
-  BarChart2,
   Upload,
   Eye,
   User as UserIcon,
@@ -107,8 +112,6 @@ interface TeacherDashboardProps {
   activeTab: string;
   onNavigateTab: (tab: string) => void;
   questions: Question[];
-  results: StudentResult[];
-  queries: StudentQuery[];
   exams: ScheduledExam[];
   onAddQuestion: (q: Question) => Promise<void> | void;
   onUpdateQuestion: (q: Question) => Promise<void> | void;
@@ -130,7 +133,8 @@ interface TeacherDashboardProps {
   ) => Promise<void> | void;
   onSaveExam: (exam: ScheduledExam) => Promise<void> | void;
   onDeleteExam?: (examId: string) => Promise<void> | void;
-  onRefreshData?: () => Promise<void> | void;
+  onRefreshData?: () => Promise<boolean | void> | void;
+  onRefreshExamData?: (user: User) => Promise<boolean>;
 }
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
@@ -138,8 +142,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   activeTab,
   onNavigateTab,
   questions,
-  results,
-  queries,
   exams,
   onAddQuestion,
   onUpdateQuestion,
@@ -149,14 +151,32 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   onResolveQueryDetailed,
   onSaveExam,
   onDeleteExam,
-  onRefreshData
+  onRefreshData,
+  onRefreshExamData
 }) => {
   // Supervised Students & Proctoring Events
   const [students, setStudents] = useState<SystemUser[]>([]);
+  const [examPollingEnabled, setExamPollingEnabled] = useState(false);
+  const refreshInProgressRef = useRef(false);
   const [proctoringEvents, setProctoringEvents] = useState<ProctoringEventRecord[]>([]);
+  const [selectedProctoringExamId, setSelectedProctoringExamId] = useState<string | null>(null);
+  const [proctoringExamResults, setProctoringExamResults] = useState<StudentResult[]>([]);
   const [attempts, setAttempts] = useState<ExamAttemptRecord[]>([]);
   const [assistanceRequests, setAssistanceRequests] = useState<AssistanceRequestRecord[]>([]);
   const [monitoringExamId, setMonitoringExamId] = useState('');
+  const [monitoringExamSearch, setMonitoringExamSearch] = useState('');
+  const [monitoringExamPage, setMonitoringExamPage] = useState(1);
+  const [historyExamId, setHistoryExamId] = useState('');
+  const [historyEvents, setHistoryEvents] = useState<ProctoringEventRecord[]>([]);
+  const [historyAttempts, setHistoryAttempts] = useState<ExamAttemptRecord[]>([]);
+  const [examResults, setExamResults] = useState<StudentResult[]>([]);
+  const [examQueries, setExamQueries] = useState<StudentQuery[]>([]);
+  const [selectedResultExamId, setSelectedResultExamId] = useState<string | null>(null);
+  const [selectedQueryExamId, setSelectedQueryExamId] = useState<string | null>(null);
+  const [isLoadingExamRecords, setIsLoadingExamRecords] = useState(false);
+  const [examRecordError, setExamRecordError] = useState<string | null>(null);
+  const [recordSearch, setRecordSearch] = useState('');
+  const [recordPage, setRecordPage] = useState(1);
   const [monitoringSearch, setMonitoringSearch] = useState('');
   const [monitoringStatusFilter, setMonitoringStatusFilter] = useState('ALL');
   const [monitoringRiskFilter, setMonitoringRiskFilter] = useState('ALL');
@@ -173,6 +193,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [queryStatusFilter, setQueryStatusFilter] = useState<'ALL' | 'PENDING' | 'RESOLVED'>('ALL');
   const [monitoringNow, setMonitoringNow] = useState(Date.now());
   const [monitoringLastUpdated, setMonitoringLastUpdated] = useState<Date | null>(null);
+  const [monitoringDataExamId, setMonitoringDataExamId] = useState('');
   const [monitoringRealtimeConnected, setMonitoringRealtimeConnected] = useState(() =>
     realtimeService.isConnected()
   );
@@ -323,27 +344,239 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   // Feedback banner
   const [feedbackBanner, setFeedbackBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  const loadTeacherData = useCallback(async (showLoading = true) => {
+  const loadTeacherData = useCallback(async (showLoading = true): Promise<boolean> => {
     if (showLoading) setIsLoadingDirectory(true);
     setDirectoryError(null);
     try {
-      const [studentList, proctorList, attemptList, assistanceList] = await Promise.all([
-        dbService.getStudents(),
-        dbService.getProctoringEvents(),
-        dbService.getAttempts(),
-        dbService.getUnblockRequests()
-      ]);
+      const studentList = await dbService.getStudents();
       setStudents(studentList);
-      setProctoringEvents(proctorList);
-      setAttempts(attemptList);
-      setAssistanceRequests(assistanceList);
       setMonitoringLastUpdated(new Date());
+      return true;
     } catch (err: any) {
       setDirectoryError(err.message || 'Unable to load dashboard data. Try again.');
+      return false;
     } finally {
       if (showLoading) setIsLoadingDirectory(false);
     }
   }, []);
+
+  const refreshMonitoringData = useCallback(async (): Promise<boolean> => {
+    try {
+      if (activeTab !== 'monitoring') return true;
+      const examId = monitoringExamId;
+      if (!examId) return true;
+      const [proctorList, attemptList, assistanceList] = await Promise.all([
+        dbService.getProctoringEvents({ examId }),
+        dbService.getAttempts(examId),
+        dbService.getUnblockRequests({ examId })
+      ]);
+      setProctoringEvents(proctorList.filter(event => event.examId === examId));
+      setAttempts(attemptList.filter(attempt => attempt.examId === examId));
+      setAssistanceRequests(previous => [
+        ...previous.filter(request => request.examId !== examId),
+        ...assistanceList
+      ]);
+      setMonitoringDataExamId(examId);
+      setMonitoringLastUpdated(new Date());
+      return true;
+    } catch (error: any) {
+      setDirectoryError(error?.message || 'Unable to refresh examination monitoring data.');
+      return false;
+    }
+  }, [activeTab, monitoringExamId]);
+
+  const loadExamResults = useCallback(async (examId: string) => {
+    setSelectedResultExamId(examId);
+    setRecordSearch('');
+    setRecordPage(1);
+    setExamRecordError(null);
+    setIsLoadingExamRecords(true);
+    try {
+      setExamResults((await dbService.getResults(examId)).filter(result => result.examId === examId));
+    } catch (error: any) {
+      setExamRecordError(error?.message || 'Unable to load results for this exam.');
+      setExamResults([]);
+    } finally {
+      setIsLoadingExamRecords(false);
+    }
+  }, []);
+
+  const loadExamQueries = useCallback(async (examId: string) => {
+    setSelectedQueryExamId(examId);
+    setRecordSearch('');
+    setRecordPage(1);
+    setExamRecordError(null);
+    setIsLoadingExamRecords(true);
+    try {
+      setExamQueries((await dbService.getQueries({ examId })).filter(query => query.examId === examId));
+    } catch (error: any) {
+      setExamRecordError(error?.message || 'Unable to load queries for this exam.');
+      setExamQueries([]);
+    } finally {
+      setIsLoadingExamRecords(false);
+    }
+  }, []);
+
+  const loadReportedQuery = useCallback(async (attempt: ExamAttemptRecord) => {
+    try {
+      const examQueries = await dbService.getQueries({ examId: attempt.examId });
+      const related = examQueries.find(query => query.attemptId === attempt.attemptId);
+      if (related) {
+        setSelectedQueryDetail(related);
+      } else {
+        setFeedbackBanner({ type: 'error', message: 'No query record was found for this attempt.' });
+      }
+    } catch (error: any) {
+      setFeedbackBanner({ type: 'error', message: error?.message || 'Unable to load the reported query.' });
+    }
+  }, []);
+
+  const resolveWorkspaceQuery = useCallback(async (
+    queryId: string,
+    payload: {
+      resolutionType: NonNullable<StudentQuery['resolutionType']>;
+      resolutionNotes: string;
+      scoreAdjustment?: number;
+      correctedAnswer?: string;
+    }
+  ) => {
+    if (!onResolveQueryDetailed) return;
+    await onResolveQueryDetailed(queryId, payload);
+    if (selectedQueryExamId) {
+      const updated = await dbService.getQueries({ examId: selectedQueryExamId });
+      setExamQueries(updated.filter(query => query.examId === selectedQueryExamId));
+    }
+    setSelectedQueryDetail(null);
+  }, [onResolveQueryDetailed, selectedQueryExamId]);
+
+  const refreshSelectedExamWorkspace = useCallback(async (): Promise<boolean> => {
+    try {
+      if (activeTab === 'results' && selectedResultExamId) {
+        setExamResults((await dbService.getResults(selectedResultExamId))
+          .filter(result => result.examId === selectedResultExamId));
+      } else if (activeTab === 'queries' && selectedQueryExamId) {
+        setExamQueries((await dbService.getQueries({ examId: selectedQueryExamId }))
+          .filter(query => query.examId === selectedQueryExamId));
+      } else if (activeTab === 'monitoring_history' && historyExamId) {
+        const [events, history] = await Promise.all([
+          dbService.getProctoringEvents({ examId: historyExamId }),
+          dbService.getAttempts(historyExamId)
+        ]);
+        setHistoryEvents(events.filter(event => event.examId === historyExamId));
+        setHistoryAttempts(history.filter(attempt => attempt.examId === historyExamId));
+      }
+      return true;
+    } catch (error: any) {
+      setExamRecordError(error?.message || 'Unable to refresh the selected exam workspace.');
+      return false;
+    }
+  }, [activeTab, historyExamId, selectedQueryExamId, selectedResultExamId]);
+
+  useEffect(() => {
+    if (activeTab === 'monitoring' && monitoringExamId) {
+      void refreshMonitoringData();
+    }
+  }, [activeTab, monitoringExamId, refreshMonitoringData]);
+
+  useEffect(() => {
+    if (activeTab !== 'monitoring_history' || !historyExamId) return;
+    let cancelled = false;
+    setExamRecordError(null);
+    setIsLoadingExamRecords(true);
+    void Promise.all([
+      dbService.getProctoringEvents({ examId: historyExamId }),
+      dbService.getAttempts(historyExamId)
+    ])
+      .then(([events, examAttempts]) => {
+        if (cancelled) return;
+        setHistoryEvents(events.filter(event => event.examId === historyExamId));
+        setHistoryAttempts(examAttempts.filter(attempt => attempt.examId === historyExamId));
+      })
+      .catch((error: any) => {
+        if (!cancelled) {
+          setExamRecordError(error?.message || 'Unable to load examination history.');
+          setHistoryEvents([]);
+          setHistoryAttempts([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingExamRecords(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, historyExamId]);
+
+  useEffect(() => {
+    if (!selectedProctoringExamId) {
+      setProctoringExamResults([]);
+      return;
+    }
+    let cancelled = false;
+    const eventRequest = selectedProctoringExamId === monitoringDataExamId
+      ? Promise.resolve(null)
+      : dbService.getProctoringEvents({ examId: selectedProctoringExamId });
+    void Promise.all([eventRequest, dbService.getResults(selectedProctoringExamId)]).then(([events, examResults]) => {
+      if (cancelled) return;
+      if (events) setProctoringEvents(events.filter(event => event.examId === selectedProctoringExamId));
+      setProctoringExamResults(examResults.filter(result => result.examId === selectedProctoringExamId));
+    }).catch((error: any) => {
+      if (!cancelled) {
+        setDirectoryError(error?.message || 'Unable to load proctoring details for this exam.');
+        setProctoringEvents([]);
+        setProctoringExamResults([]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [monitoringDataExamId, selectedProctoringExamId]);
+
+  const handleManualRefresh = async () => {
+    if (refreshInProgressRef.current) return;
+    refreshInProgressRef.current = true;
+    try {
+    const [localRefresh, monitoringRefresh, workspaceRefresh, globalRefresh] = await Promise.all([
+      loadTeacherData(),
+      activeTab === 'monitoring' ? refreshMonitoringData() : Promise.resolve(true),
+      refreshSelectedExamWorkspace(),
+      onRefreshData?.()
+    ]);
+    if (localRefresh && monitoringRefresh && workspaceRefresh && globalRefresh !== false) setExamPollingEnabled(true);
+    } finally {
+      refreshInProgressRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    if (!examPollingEnabled || !['overview', 'exams', 'monitoring', 'monitoring_history', 'results', 'queries'].includes(activeTab)) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      if (refreshInProgressRef.current || realtimeService.isConnected()) return;
+      refreshInProgressRef.current = true;
+      void Promise.all([
+        refreshMonitoringData(),
+        refreshSelectedExamWorkspace(),
+        onRefreshExamData?.(user)
+      ])
+        .finally(() => {
+          refreshInProgressRef.current = false;
+        });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, examPollingEnabled, onRefreshExamData, refreshMonitoringData, refreshSelectedExamWorkspace, user]);
+
+  useEffect(
+    () =>
+      realtimeService.subscribeStatus(status => {
+        if (status.connected && status.reconnected) {
+          void refreshMonitoringData();
+          void refreshSelectedExamWorkspace();
+        }
+      }),
+      [onRefreshExamData, refreshMonitoringData, refreshSelectedExamWorkspace, user]
+  );
 
   const handleAssistanceReview = (
     requestId: string,
@@ -412,8 +645,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   useEffect(() => {
     const unsub = realtimeService.subscribe(payload => {
       const data = payload.data as Record<string, any> | undefined;
+      if (payload.event === 'exam.deleted' && typeof data?.examId === 'string') {
+        setAttempts(previous => previous.filter(attempt => attempt.examId !== data.examId));
+        setProctoringEvents(previous => previous.filter(event => event.examId !== data.examId));
+        setAssistanceRequests(previous => previous.filter(request => request.examId !== data.examId));
+        setExamResults(previous => previous.filter(result => result.examId !== data.examId));
+        setExamQueries(previous => previous.filter(query => query.examId !== data.examId));
+        if (monitoringExamId === data.examId) setMonitoringExamId('');
+        if (historyExamId === data.examId) setHistoryExamId('');
+        if (selectedResultExamId === data.examId) setSelectedResultExamId(null);
+        if (selectedQueryExamId === data.examId) setSelectedQueryExamId(null);
+        return;
+      }
       if (payload.event === 'monitoring.updated' && data?.attempt) {
         const incoming = data.attempt as ExamAttemptRecord;
+        if (incoming.examId !== monitoringExamId) return;
         setAttempts(previous => [
           incoming,
           ...previous.filter(attempt => attempt.attemptId !== incoming.attemptId)
@@ -423,21 +669,31 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       }
       if (payload.event === 'proctoring.event' && data?.event) {
         const incoming = data.event as ProctoringEventRecord;
+        if (
+          incoming.examId !== monitoringExamId &&
+          incoming.examId !== historyExamId &&
+          incoming.examId !== selectedProctoringExamId
+        ) return;
         setProctoringEvents(previous => [
           incoming,
           ...previous.filter(event => event.eventId !== incoming.eventId)
         ]);
+        if (incoming.examId === historyExamId) {
+          setHistoryEvents(previous => [incoming, ...previous.filter(event => event.eventId !== incoming.eventId)]);
+        }
         setMonitoringLastUpdated(new Date());
         return;
       }
       if ((payload.event === 'unblock.created' || payload.event === 'unblock.updated') && data?.request) {
         const incoming = data.request as AssistanceRequestRecord;
+        if (incoming.examId !== monitoringExamId) return;
         setAssistanceRequests(previous => [
           incoming,
           ...previous.filter(request => request.requestId !== incoming.requestId)
         ]);
         if (data.attempt) {
           const attempt = data.attempt as ExamAttemptRecord;
+          if (attempt.examId !== monitoringExamId) return;
           setAttempts(previous => [
             attempt,
             ...previous.filter(item => item.attemptId !== attempt.attemptId)
@@ -456,6 +712,27 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             }
           : attempt));
         setMonitoringLastUpdated(new Date());
+        return;
+      }
+      if (payload.event.startsWith('query.') && data?.query) {
+        const incoming = mapBackendQueryToFrontend(data.query);
+        if (incoming.examId === selectedQueryExamId) {
+          setExamQueries(previous => [incoming, ...previous.filter(query => query.queryId !== incoming.queryId)]);
+        }
+        return;
+      }
+      if (
+        (payload.event === 'result.created' || payload.event === 'result.updated' ||
+          payload.event === 'result.published') &&
+        data?.result
+      ) {
+        const incoming = mapBackendResultToFrontend(data.result);
+        if (incoming.examId === selectedResultExamId) {
+          setExamResults(previous => [incoming, ...previous.filter(result => result.resultId !== incoming.resultId)]);
+        }
+        if (incoming.examId === selectedProctoringExamId) {
+          setProctoringExamResults(previous => [incoming, ...previous.filter(result => result.resultId !== incoming.resultId)]);
+        }
         return;
       }
       if (payload.event === 'attempt.resumed' && data?.attemptId) {
@@ -489,7 +766,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       unsub();
       unsubStatus();
     };
-  }, [loadTeacherData]);
+  }, [historyExamId, loadTeacherData, monitoringExamId, selectedProctoringExamId, selectedQueryExamId, selectedResultExamId]);
 
   const handleOpenStudentDetails = async (studentId: string) => {
     setIsLoadingStudentDetails(true);
@@ -1015,28 +1292,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     }, {});
   const aiDraftGroups = Object.keys(aiDraftGroupMap).map((generationId) => aiDraftGroupMap[generationId]);
 
-  // Aggregate permitted student results for subject-level analytics.
-  const subjectStatsMap: Record<string, { totalPct: number; count: number }> = {};
-  results.forEach(r => {
-    const key = r.subject || r.topic || 'General';
-    if (!subjectStatsMap[key]) subjectStatsMap[key] = { totalPct: 0, count: 0 };
-    const pct =
-      r.percentage !== undefined
-        ? r.percentage
-        : r.accuracy !== undefined
-        ? r.accuracy
-        : r.totalQuestions > 0
-        ? Math.round((r.score / r.totalQuestions) * 100)
-        : 0;
-    subjectStatsMap[key].totalPct += pct;
-    subjectStatsMap[key].count += 1;
-  });
-  const masteryData = Object.entries(subjectStatsMap).map(([subject, data]) => ({
-    subject: subject.length > 18 ? `${subject.slice(0, 18)}...` : subject,
-    averagePercentage: Math.round(data.totalPct / data.count),
-    submissions: data.count
-  }));
-
   // Authoritative Real Metrics Derived Directly from Database State
   const activeStudentsCount = students.filter(s => s.status === 'ACTIVE').length;
   const inactiveStudentsCount = students.filter(s => s.status !== 'ACTIVE').length;
@@ -1071,23 +1326,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     new Set(questions.map(q => q.subject?.trim() || q.topic?.trim()).filter(Boolean))
   ).length;
 
-  const publishedResultsCount = results.filter(
+  const publishedResultsCount = examResults.filter(
     r => r.isPublished || r.status === 'PUBLISHED'
   ).length;
-  const unpublishedResultsCount = results.length - publishedResultsCount;
-  const passedResultsCount = results.filter(
+  const unpublishedResultsCount = examResults.length - publishedResultsCount;
+  const passedResultsCount = examResults.filter(
     r => r.passed === true || (r.percentage ?? r.accuracy ?? 0) >= 40
   ).length;
 
-  const openQueriesCount = queries.filter(
+  const openQueriesCount = examQueries.filter(
     q => q.status === 'OPEN' || q.status === 'PENDING' || q.status === 'UNDER_REVIEW'
   ).length;
-  const visibleQueries = queries.filter(query => {
+  const visibleQueries = examQueries.filter(query => {
     const pending = ['OPEN', 'PENDING', 'UNDER_REVIEW'].includes(query.status);
     const resolved = ['RESOLVED', 'APPROVED', 'REJECTED', 'RESOLVED_ACCEPTED', 'RESOLVED_REJECTED'].includes(query.status);
     return queryStatusFilter === 'ALL' || (queryStatusFilter === 'PENDING' ? pending : resolved);
   });
-  const resolvedQueriesCount = queries.filter(
+  const resolvedQueriesCount = examQueries.filter(
     q =>
       q.status === 'RESOLVED' ||
       q.status === 'APPROVED' ||
@@ -1096,27 +1351,69 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       q.status === 'RESOLVED_REJECTED'
   ).length;
 
-  const criticalEventsCount = proctoringEvents.filter(
-    e => e.severity === 'HIGH' || e.severity === 'CRITICAL'
-  ).length;
-
-  const activeAttemptsCount = attempts.filter(a => a.status === 'IN_PROGRESS').length;
-  const blockedAttemptsCount = attempts.filter(
-    a => a.suspended || a.status === 'TERMINATED' || a.proctoringStatus === 'TERMINATED'
-  ).length;
-  const submittedAttemptsCount = attempts.filter(
-    a => a.status === 'SUBMITTED' || a.status === 'EVALUATED'
-  ).length;
-
-  const monitoringExams = exams.filter(exam =>
-    exam.status === 'LIVE' ||
-    attempts.some(attempt => attempt.examId === (exam.examId || exam.id) && attempt.status === 'IN_PROGRESS')
+  const monitoringExams = exams.filter(exam => exam.status === 'LIVE');
+  const matchingMonitoringExams = monitoringExams.filter(exam =>
+    !monitoringExamSearch.trim() ||
+    [exam.examId, exam.title, exam.subject]
+      .some(value => value?.toLocaleLowerCase().includes(monitoringExamSearch.trim().toLocaleLowerCase()))
   );
-  const selectedMonitoringExam =
-    monitoringExams.find(exam => (exam.examId || exam.id) === monitoringExamId) ||
-    monitoringExams.find(exam => exam.status === 'LIVE') ||
-    monitoringExams[0];
+  const monitoringExamPageCount = Math.max(1, Math.ceil(matchingMonitoringExams.length / 25));
+  const pageMonitoringExams = matchingMonitoringExams.slice((monitoringExamPage - 1) * 25, monitoringExamPage * 25);
+  const selectedMonitoringExam = monitoringExams.find(
+    exam => (exam.examId || exam.id) === monitoringExamId
+  );
   const selectedMonitoringExamId = selectedMonitoringExam?.examId || selectedMonitoringExam?.id || '';
+  const selectedFacultyProctoringEvents = proctoringEvents
+    .filter(event => event.examId === selectedProctoringExamId)
+    .sort((first, second) => new Date(second.timestamp).getTime() - new Date(first.timestamp).getTime());
+  const selectedResultExam = exams.find(exam => (exam.examId || exam.id) === selectedResultExamId);
+  const selectedQueryExam = exams.find(exam => (exam.examId || exam.id) === selectedQueryExamId);
+  const historyExams = exams.filter(exam =>
+    ['ENDED', 'CLOSED', 'COMPLETED', 'RESULT_PUBLISHED', 'ARCHIVED'].includes(exam.status)
+  );
+  const matchingHistoryExams = historyExams.filter(exam =>
+    !recordSearch.trim() ||
+    [exam.examId, exam.title, exam.subject]
+      .some(value => value?.toLocaleLowerCase().includes(recordSearch.trim().toLocaleLowerCase()))
+  );
+  const selectedHistoryExam = historyExams.find(exam => (exam.examId || exam.id) === historyExamId);
+  const normalizedRecordSearch = recordSearch.trim().toLocaleLowerCase();
+  const matchingExams = exams.filter(exam =>
+    !normalizedRecordSearch ||
+    [exam.examId, exam.title, exam.subject]
+      .some(value => value?.toLocaleLowerCase().includes(normalizedRecordSearch))
+  );
+  const matchingExamResults = examResults.filter(result =>
+    !normalizedRecordSearch ||
+    [result.resultId, result.studentName, result.studentId]
+      .some(value => value?.toLocaleLowerCase().includes(normalizedRecordSearch))
+  );
+  const matchingExamQueries = visibleQueries.filter(query =>
+    !normalizedRecordSearch ||
+    [query.queryId, query.studentName, query.studentId, query.questionText, query.message]
+      .some(value => value?.toLocaleLowerCase().includes(normalizedRecordSearch))
+  );
+  const recordPageSize = 25;
+  const examPageCount = Math.max(1, Math.ceil(matchingExams.length / recordPageSize));
+  const resultPageCount = Math.max(1, Math.ceil(matchingExamResults.length / recordPageSize));
+  const queryPageCount = Math.max(1, Math.ceil(matchingExamQueries.length / recordPageSize));
+  const pageExams = matchingExams.slice((recordPage - 1) * recordPageSize, recordPage * recordPageSize);
+  const historyExamPageCount = Math.max(1, Math.ceil(matchingHistoryExams.length / recordPageSize));
+  const pageHistoryExams = matchingHistoryExams.slice((recordPage - 1) * recordPageSize, recordPage * recordPageSize);
+  const pageResults = matchingExamResults.slice((recordPage - 1) * recordPageSize, recordPage * recordPageSize);
+  const pageQueries = matchingExamQueries.slice((recordPage - 1) * recordPageSize, recordPage * recordPageSize);
+  const historyPageCount = Math.max(1, Math.ceil(historyEvents.length / recordPageSize));
+  const pageHistoryEvents = historyEvents.slice((recordPage - 1) * recordPageSize, recordPage * recordPageSize);
+
+  useEffect(() => {
+    if (monitoringExamId && !monitoringExams.some(exam => (exam.examId || exam.id) === monitoringExamId)) {
+      setMonitoringExamId('');
+      setAttempts([]);
+      setProctoringEvents([]);
+      setAssistanceRequests([]);
+      setMonitoringDataExamId('');
+    }
+  }, [monitoringExamId, monitoringExams]);
   const monitoringExamAttempts = attempts
     .filter(attempt => attempt.examId === selectedMonitoringExamId)
     .slice()
@@ -1401,9 +1698,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             {activeTab === 'questions' && 'Question Bank'}
             {activeTab === 'ai_generator' && 'AI Question Generation'}
             {activeTab === 'monitoring' && 'Exam Monitoring'}
+            {activeTab === 'monitoring_history' && 'Monitoring History'}
             {activeTab === 'results' && 'Results'}
             {activeTab === 'queries' && 'Queries'}
-            {activeTab === 'analytics' && 'Analytics'}
             {activeTab === 'profile' && 'Profile'}
           </h1>
           <p className="text-[13px] font-normal text-slate-500 dark:text-slate-400 mt-1">
@@ -1414,10 +1711,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            onClick={() => {
-              loadTeacherData();
-              if (onRefreshData) onRefreshData();
-            }}
+            onClick={() => void handleManualRefresh()}
             className="h-9 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center gap-1.5 transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoadingDirectory ? 'animate-spin' : ''}`} />
@@ -1508,19 +1802,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             />
 
             <KpiCard
-              label="Open Queries"
-              value={openQueriesCount}
-              subValue={`${resolvedQueriesCount} Resolved`}
+              label="Exam Queries"
+              value="By exam"
+              subValue="Open a selected exam to review"
               icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-              onClick={() => {
-                setQueryStatusFilter('PENDING');
-                onNavigateTab('queries');
-              }}
+              onClick={() => onNavigateTab('queries')}
             />
             <KpiCard
-              label="Results"
-              value={results.length}
-              subValue={`${unpublishedResultsCount} Pending publication`}
+              label="Exam Results"
+              value="By exam"
+              subValue="Open a selected exam to review"
               icon={<CheckCircle className="w-5 h-5 text-teal-600 dark:text-teal-400" />}
               onClick={() => onNavigateTab('results')}
             />
@@ -1585,43 +1876,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               )}
             </div>
 
-            {/* Recent Submissions */}
+            {/* Exam results workspace shortcut */}
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                  Results
+                  Results by exam
                 </h2>
                 <button
                   type="button"
                   onClick={() => onNavigateTab('results')}
                   className="text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline"
                 >
-                  View all
+                  Select exam
                 </button>
               </div>
-              {results.length === 0 ? (
-                <p className="text-[15px] text-slate-500 dark:text-slate-400 py-8 text-center">
-                  No results available.
-                </p>
-              ) : (
-                <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                  {results.slice(0, 5).map(r => (
-                    <div key={r.id} className="py-3 flex items-center justify-between text-[14.5px]">
-                      <div>
-                        <p className="font-medium text-slate-900 dark:text-white">
-                          {r.studentName} ({r.studentId})
-                        </p>
-                        <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
-                          {r.examTitle || r.topic} · Score: {r.score}/{r.totalQuestions}
-                        </p>
-                      </div>
-                      <span className="text-[13px] font-medium text-slate-600 dark:text-slate-300">
-                        {r.isPublished ? 'Published' : 'Unpublished'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <p className="py-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                Results are loaded only after selecting an authorized exam.
+              </p>
             </div>
           </div>
         </div>
@@ -1654,10 +1925,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               isLoading={isLoadingDirectory}
             />
             <KpiCard
-              label="Student Queries"
-              value={queries.length}
-              subValue={`${openQueriesCount} Open inquiries`}
+              label="Exam Queries"
+              value="Scoped"
+              subValue="Review queries in the exam workspace"
               icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
+              onClick={() => onNavigateTab('queries')}
               isLoading={isLoadingDirectory}
             />
           </div>
@@ -1774,7 +2046,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           generationBatches={aiGenerationBatches}
           students={students}
           onSaveExam={onSaveExam}
-          onDeleteExam={onDeleteExam}
+          onDeleteExam={undefined}
           onStatusChange={onStatusChange}
           onRequestGenerateQuestions={(ctx) => {
             setSavedExamDraft({
@@ -2501,10 +2773,80 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       {/* 6. EXAM MONITORING (PROCTORING) TAB */}
       {activeTab === 'monitoring' && (
         <div className="space-y-5">
+          {!selectedMonitoringExamId && (
+          <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
+              <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+                Live exams ({monitoringExams.length})
+              </h2>
+              <input aria-label="Search live exams" value={monitoringExamSearch} onChange={event => { setMonitoringExamSearch(event.target.value); setMonitoringExamPage(1); }} placeholder="Search live exams..." className="h-9 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" />
+            </div>
+            {monitoringExams.length === 0 ? (
+                <p className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                  No exams are currently live.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-400">
+                        <th className="p-3">Exam ID</th>
+                        <th className="p-3">Exam Title</th>
+                        <th className="p-3">Subject</th>
+                        <th className="p-3">Scheduled</th>
+                        <th className="p-3"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
+                      {pageMonitoringExams.map(exam => (
+                        <tr key={exam.examId || exam.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                          <td className="p-3 font-mono text-blue-600 dark:text-blue-400">{exam.examId || exam.id}</td>
+                          <td className="p-3 font-medium text-slate-900 dark:text-white">{exam.title}</td>
+                          <td className="p-3 text-slate-600 dark:text-slate-300">{exam.subject || exam.course}</td>
+                          <td className="p-3 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                            {exam.scheduledDate} · {exam.startTime}
+                          </td>
+                          <td className="p-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMonitoringExamId(exam.examId || exam.id);
+                                setMonitoringPage(1);
+                              }}
+                              className="text-sm font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                            >
+                              Open monitor
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {monitoringExamPage} of {monitoringExamPageCount} · {matchingMonitoringExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={monitoringExamPage <= 1} onClick={() => setMonitoringExamPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={monitoringExamPage >= monitoringExamPageCount} onClick={() => setMonitoringExamPage(page => Math.min(monitoringExamPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
+                </div>
+              )}
+          </section>
+          )}
+          {selectedMonitoringExamId && (
+          <>
           <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setMonitoringExamId('')}
+                    className="mr-2 inline-flex items-center rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                  >
+                    ← Back to live exams
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedProctoringExamId(selectedMonitoringExamId)}
+                    className="rounded-md border border-blue-200 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30"
+                  >
+                    Proctoring insights
+                  </button>
                   {selectedMonitoringExam?.status === 'LIVE' && (
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-bold tracking-wide text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
                       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" /> LIVE
@@ -2533,34 +2875,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {monitoringExams.length > 1 && (
-                  <label className="sr-only" htmlFor="monitoring-exam-select">Select exam</label>
-                )}
-                {monitoringExams.length > 0 && (
-                  <select
-                    id="monitoring-exam-select"
-                    value={selectedMonitoringExamId}
-                    onChange={event => {
-                      setMonitoringExamId(event.target.value);
-                      setMonitoringPage(1);
-                    }}
-                    className="h-9 max-w-[260px] rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                    aria-label="Select exam to monitor"
-                  >
-                    {monitoringExams.map(exam => (
-                      <option key={exam.examId || exam.id} value={exam.examId || exam.id}>
-                        {exam.title} · {exam.examId || exam.id}
-                      </option>
-                    ))}
-                  </select>
-                )}
                 <span className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold ${monitoringRealtimeConnected ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'}`}>
                   {monitoringRealtimeConnected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
                   {monitoringRealtimeConnected ? 'Live connection' : 'Reconnecting'}
                 </span>
                 <button
                   type="button"
-                  onClick={() => void loadTeacherData()}
+                  onClick={() => void refreshMonitoringData()}
                   className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-[13px] text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
                 >
                   <RefreshCw className="h-3.5 w-3.5" /> Refresh
@@ -2918,308 +3239,128 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     </div>
                   </>
                 )}
-              </section>
-            </>
+          </section>
+          </>
+          )}
+          </>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'monitoring_history' && (
+        <div className="space-y-5">
+          {historyExamId ? (
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="border-b border-slate-200 p-4 dark:border-slate-700">
+                <button type="button" onClick={() => setHistoryExamId('')} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← Back to Exams</button>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">{selectedHistoryExam?.title || historyExamId} · Monitoring report</h2>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{historyExamId} · {historyAttempts.length} attempts · {historyEvents.length} proctoring events</p>
+              </div>
+              {examRecordError && <p role="alert" className="m-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">{examRecordError}</p>}
+              {isLoadingExamRecords ? <p className="p-10 text-center text-sm text-slate-500">Loading report…</p> : (
+                <div className="space-y-6 p-4">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <KpiCard label="Attempts" value={historyAttempts.length} icon={<FileText className="h-5 w-5 text-blue-600" />} />
+                    <KpiCard label="Finalized" value={historyAttempts.filter(attempt => attempt.status !== 'IN_PROGRESS').length} icon={<CheckCircle className="h-5 w-5 text-emerald-600" />} />
+                    <KpiCard label="Proctoring events" value={historyEvents.length} icon={<Shield className="h-5 w-5 text-amber-600" />} />
+                    <KpiCard label="High / Critical" value={historyEvents.filter(event => event.severity === 'HIGH' || event.severity === 'CRITICAL').length} icon={<AlertCircle className="h-5 w-5 text-rose-600" />} />
+                  </div>
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+                    <table className="w-full min-w-[850px] text-left text-sm">
+                      <thead><tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-500 dark:border-slate-700 dark:bg-slate-900/50"><th className="p-3">Timestamp</th><th className="p-3">Student</th><th className="p-3">Event</th><th className="p-3">Severity</th><th className="p-3">Details</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-700">{pageHistoryEvents.map(event => <tr key={event.eventId}><td className="whitespace-nowrap p-3 text-xs text-slate-500">{new Date(event.timestamp).toLocaleString()}</td><td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{event.studentName}</div><div className="font-mono text-xs text-slate-500">{event.studentId}</div></td><td className="p-3">{event.eventType}</td><td className="p-3">{event.severity}</td><td className="max-w-lg p-3 text-slate-600 dark:text-slate-300">{event.details}</td></tr>)}</tbody>
+                    </table>
+                    {historyEvents.length === 0 && <p className="p-8 text-center text-sm text-slate-500">No proctoring events recorded</p>}
+                    {historyEvents.length > recordPageSize && <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {historyPageCount}</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= historyPageCount} onClick={() => setRecordPage(page => Math.min(historyPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>}
+                  </div>
+                </div>
+              )}
+            </section>
+          ) : (
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="border-b border-slate-200 p-4 dark:border-slate-700"><h2 className="text-lg font-semibold text-slate-900 dark:text-white">Monitoring history</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Select an ended exam to view its monitoring report.</p></div>
+              <div className="border-b border-slate-200 p-4 dark:border-slate-700"><input aria-label="Search history exams" value={recordSearch} onChange={event => { setRecordSearch(event.target.value); setRecordPage(1); }} placeholder="Search completed exams..." className="h-9 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" /></div>
+              {historyExams.length === 0 ? <p className="p-10 text-center text-sm text-slate-500">No completed exams available.</p> : <><div className="divide-y divide-slate-100 dark:divide-slate-700">{pageHistoryExams.map(exam => <div key={exam.examId || exam.id} className="flex items-center justify-between gap-4 p-4"><div><p className="font-medium text-slate-900 dark:text-white">{exam.title}</p><p className="mt-1 font-mono text-xs text-slate-500">{exam.examId || exam.id} · {exam.subject} · {exam.status}</p></div><button type="button" onClick={() => { setRecordPage(1); setHistoryExamId(exam.examId || exam.id); }} className="rounded-md border border-blue-200 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30">View report</button></div>)}</div><div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {historyExamPageCount} · {matchingHistoryExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= historyExamPageCount} onClick={() => setRecordPage(page => Math.min(historyExamPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div></>}
+            </section>
           )}
         </div>
       )}
 
       {/* 7. RESULTS TAB */}
       {activeTab === 'results' && (
-        <div className="space-y-6">
-          {/* Results KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard
-              label="Total Submissions"
-              value={results.length}
-              subValue="Evaluated attempts"
-              icon={<CheckCircle className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-            />
-            <KpiCard
-              label="Published Results"
-              value={publishedResultsCount}
-              subValue="Released to students"
-              icon={<CheckCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />}
-            />
-            <KpiCard
-              label="Pending Publication"
-              value={unpublishedResultsCount}
-              subValue="Awaiting release"
-              icon={<AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-            />
-            <KpiCard
-              label="Qualified Candidates"
-              value={passedResultsCount}
-              subValue={`${results.length - passedResultsCount} Below threshold`}
-              icon={<CheckCircle className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
-            />
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Results ({results.length})
-              </h2>
-            {unpublishedResultsCount > 0 && (
-              <span className="text-[13.5px] font-medium text-amber-600 dark:text-amber-400">
-                {unpublishedResultsCount} pending publication
-              </span>
-            )}
-          </div>
-
-          {results.length === 0 ? (
-            <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No results available.
-            </div>
+        <div className="space-y-5">
+          {selectedResultExamId ? (
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
+                <div>
+                  <button type="button" onClick={() => setSelectedResultExamId(null)} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← Back to Exams</button>
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-white">{selectedResultExam?.title || selectedResultExamId} · Results</h2>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{examResults.length} results · {publishedResultsCount} published · {unpublishedResultsCount} pending publication</p>
+                </div>
+                <input aria-label="Search results" value={recordSearch} onChange={event => { setRecordSearch(event.target.value); setRecordPage(1); }} placeholder="Search student or result..." className="h-9 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" />
+              </div>
+              {examRecordError && <p role="alert" className="m-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">{examRecordError}</p>}
+              {isLoadingExamRecords ? <p className="p-10 text-center text-sm text-slate-500">Loading results…</p> : pageResults.length === 0 ? <p className="p-10 text-center text-sm text-slate-500">No results for this exam.</p> : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[850px] text-left">
+                    <thead><tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-500 dark:border-slate-700 dark:bg-slate-900/50"><th className="p-3">Student</th><th className="p-3">Score</th><th className="p-3">Percentage</th><th className="p-3">Grade</th><th className="p-3">Status</th><th className="p-3 text-right">Actions</th></tr></thead>
+                    <tbody className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
+                      {pageResults.map(result => {
+                        const percentage = result.percentage ?? result.accuracy ?? (result.totalMarks ? Math.round(result.score / result.totalMarks * 100) : 0);
+                        const published = result.isPublished || result.status === 'PUBLISHED';
+                        return <tr key={result.resultId || result.id}>
+                          <td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{result.studentName}</div><div className="font-mono text-xs text-slate-500">{result.studentId}</div></td>
+                          <td className="p-3 tabular-nums">{result.score} / {result.totalMarks || result.totalQuestions}</td>
+                          <td className="p-3 tabular-nums">{percentage}%</td>
+                          <td className="p-3">{result.grade || '—'}</td>
+                          <td className="p-3">{published ? 'PUBLISHED' : 'PENDING'}</td>
+                          <td className="p-3 text-right">
+                            <button type="button" onClick={() => setSelectedResultDetail(result)} className="mr-2 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium dark:border-slate-700">View</button>
+                            {!published && <button type="button" onClick={() => confirmAction({ title: 'Publish Results', message: `Publish results for ${result.studentName}?`, confirmLabel: 'Publish', cancelLabel: 'Cancel', variant: 'primary', action: async () => { await onPublishResult(result.resultId || result.id); setExamResults(previous => previous.map(item => item.resultId === result.resultId ? { ...item, status: 'PUBLISHED', isPublished: true } : item)); } })} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white">Publish</button>}
+                          </td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                  <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {resultPageCount} · {matchingExamResults.length} results</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= resultPageCount} onClick={() => setRecordPage(page => Math.min(resultPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
+                </div>
+              )}
+            </section>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="p-3.5">Result ID</th>
-                    <th className="p-3.5">Student</th>
-                    <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Marks</th>
-                    <th className="p-3.5">Percentage</th>
-                    <th className="p-3.5">Grade</th>
-                    <th className="p-3.5">Status</th>
-                    <th className="p-3.5 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {results.map(r => {
-                    const pct =
-                      r.percentage ??
-                      r.accuracy ??
-                      (r.totalMarks
-                        ? Math.round((r.score / r.totalMarks) * 100)
-                        : r.totalQuestions
-                          ? Math.round((r.score / r.totalQuestions) * 100)
-                          : 0);
-                    return (
-                      <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                        <td className="p-3.5 font-mono text-[14px] font-medium tabular-nums">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedResultDetail(r)}
-                            className="text-blue-600 dark:text-blue-400 hover:underline"
-                          >
-                            {r.resultId || r.id}
-                          </button>
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-900 dark:text-white">
-                            {r.studentName}
-                          </div>
-                          <div className="text-[13px] font-mono text-slate-500 tabular-nums">{r.studentId}</div>
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-800 dark:text-slate-200">
-                            {r.examTitle || r.topic}
-                          </div>
-                          <div className="text-[13px] text-slate-500 tabular-nums">{r.date}</div>
-                        </td>
-                        <td className="p-3.5 font-semibold text-slate-900 dark:text-white tabular-nums">
-                          {r.score} / {r.totalMarks || r.totalQuestions}
-                        </td>
-                        <td className="p-3.5 text-slate-700 dark:text-slate-300 tabular-nums">
-                          {pct}%
-                        </td>
-                        <td className="p-3.5 font-semibold text-blue-600 dark:text-blue-400">
-                          {r.grade || (pct >= 80 ? 'A' : pct >= 60 ? 'B' : pct >= 40 ? 'C' : 'F')}
-                        </td>
-                        <td className="p-3.5 text-[13px] font-medium text-slate-700 dark:text-slate-300">
-                          {r.isPublished ? 'PUBLISHED' : 'PENDING'}
-                        </td>
-                        <td className="p-3.5 text-right whitespace-nowrap space-x-2">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedResultDetail(r)}
-                            className="h-9 px-3 rounded-lg border border-blue-200 dark:border-blue-800 text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
-                          >
-                            View
-                          </button>
-                          {!r.isPublished && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                confirmAction({
-                                  title: 'Publish Results',
-                                  message: `Are you sure you want to publish the results for ${r.studentName}? Students will be able to view the published results.`,
-                                  confirmLabel: 'Yes, Publish',
-                                  cancelLabel: 'No',
-                                  variant: 'primary',
-                                  action: async () => {
-                                    await onPublishResult(r.resultId || r.id);
-                                  }
-                                });
-                              }}
-                              className="h-9 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[14px] font-medium"
-                            >
-                              Publish
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700"><div><h2 className="text-lg font-semibold text-slate-900 dark:text-white">Results by exam</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Select an exam to load its results.</p></div><input aria-label="Search exams" value={recordSearch} onChange={event => setRecordSearch(event.target.value)} placeholder="Search exams..." className="h-9 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" /></div>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">{pageExams.map(exam => <div key={exam.examId || exam.id} className="flex items-center justify-between gap-4 p-4"><div><p className="font-medium text-slate-900 dark:text-white">{exam.title}</p><p className="mt-1 font-mono text-xs text-slate-500">{exam.examId || exam.id} · {exam.subject} · {exam.status}</p></div><button type="button" onClick={() => void loadExamResults(exam.examId || exam.id)} className="rounded-md border border-blue-200 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30">View</button></div>)}</div>
+              <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {examPageCount} · {matchingExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= examPageCount} onClick={() => setRecordPage(page => Math.min(examPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
+            </section>
           )}
-        </div>
         </div>
       )}
 
       {/* 8. QUERIES TAB */}
       {activeTab === 'queries' && (
-        <div className="space-y-6">
-          {/* Queries KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard
-              label="Total Queries"
-              value={queries.length}
-              subValue="From student submissions"
-              icon={<MessageSquare className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-            />
-            <KpiCard
-              label="Open Queries"
-              value={openQueriesCount}
-              subValue="Requires faculty response"
-              icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-            />
-            <KpiCard
-              label="Resolved"
-              value={resolvedQueriesCount}
-              subValue="Adjudicated inquiries"
-              icon={<CheckCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />}
-            />
-            <KpiCard
-              label="Exams with Queries"
-              value={Array.from(new Set(queries.map(q => q.examId).filter(Boolean))).length}
-              subValue="Distinct examinations"
-              icon={<FileText className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
-            />
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Queries ({visibleQueries.length})
-              </h2>
-              <select
-                aria-label="Filter queries by status"
-                value={queryStatusFilter}
-                onChange={event => setQueryStatusFilter(event.target.value as typeof queryStatusFilter)}
-                className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-              >
-                <option value="ALL">All statuses</option>
-                <option value="PENDING">Pending / in review</option>
-                <option value="RESOLVED">Resolved</option>
-              </select>
-            </div>
-          {visibleQueries.length === 0 ? (
-            <div className="py-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              {queries.length ? 'No queries match this filter.' : 'No queries available.'}
-            </div>
+        <div className="space-y-5">
+          {selectedQueryExamId ? (
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
+                <div><button type="button" onClick={() => setSelectedQueryExamId(null)} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← Back to Exams</button><h2 className="text-lg font-semibold text-slate-900 dark:text-white">{selectedQueryExam?.title || selectedQueryExamId} · Queries</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{examQueries.length} queries · {openQueriesCount} open · {resolvedQueriesCount} resolved</p></div>
+                <div className="flex flex-wrap gap-2"><input aria-label="Search queries" value={recordSearch} onChange={event => { setRecordSearch(event.target.value); setRecordPage(1); }} placeholder="Search student or query..." className="h-9 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" /><select aria-label="Filter queries by status" value={queryStatusFilter} onChange={event => { setQueryStatusFilter(event.target.value as typeof queryStatusFilter); setRecordPage(1); }} className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"><option value="ALL">All statuses</option><option value="PENDING">Pending / in review</option><option value="RESOLVED">Resolved</option></select></div>
+              </div>
+              {examRecordError && <p role="alert" className="m-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">{examRecordError}</p>}
+              {isLoadingExamRecords ? <p className="p-10 text-center text-sm text-slate-500">Loading queries…</p> : pageQueries.length === 0 ? <p className="p-10 text-center text-sm text-slate-500">{examQueries.length ? 'No queries match the selected filter.' : 'No queries for this exam.'}</p> : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[820px] text-left"><thead><tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-500 dark:border-slate-700 dark:bg-slate-900/50"><th className="p-3">Query</th><th className="p-3">Student</th><th className="p-3">Issue</th><th className="p-3">Status</th><th className="p-3">Created</th><th className="p-3 text-right">Review</th></tr></thead>
+                    <tbody className="divide-y divide-slate-100 text-sm dark:divide-slate-700">{pageQueries.map(query => <tr key={query.queryId || query.id}><td className="p-3"><button type="button" onClick={() => setSelectedQueryDetail(query)} className="font-mono text-blue-600 hover:underline dark:text-blue-400">{query.queryId || query.id}</button><p className="mt-1 max-w-sm truncate text-xs text-slate-500">{query.questionText || query.message || query.description}</p></td><td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{query.studentName}</div><div className="font-mono text-xs text-slate-500">{query.studentId}</div></td><td className="p-3">{query.reasonType.replaceAll('_', ' ')}</td><td className="p-3">{query.status}</td><td className="p-3 text-xs text-slate-500">{query.createdAt}</td><td className="p-3 text-right"><button type="button" onClick={() => setSelectedQueryDetail(query)} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-medium dark:border-slate-700">Review</button></td></tr>)}</tbody>
+                  </table>
+                  <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {queryPageCount} · {matchingExamQueries.length} queries</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= queryPageCount} onClick={() => setRecordPage(page => Math.min(queryPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
+                </div>
+              )}
+            </section>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="p-3.5">Query ID</th>
-                    <th className="p-3.5">Student / Student ID</th>
-                    <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Question #</th>
-                    <th className="p-3.5">Issue</th>
-                    <th className="p-3.5">Status</th>
-                    <th className="p-3.5">Created</th>
-                    <th className="p-3.5 text-right">Review</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {visibleQueries.map(q => {
-                    const qKey = q.queryId || q.id;
-                    return (
-                      <tr key={qKey} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                        <td className="p-3.5 font-mono text-[14px] font-medium tabular-nums">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedQueryDetail(q)}
-                            className="text-blue-600 dark:text-blue-400 hover:underline"
-                          >
-                            {qKey}
-                          </button>
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-900 dark:text-white">
-                            {q.studentName}
-                          </div>
-                          <div className="text-[13px] font-mono text-slate-500 tabular-nums">{q.studentId}</div>
-                        </td>
-                        <td className="p-3.5 text-slate-700 dark:text-slate-300">
-                          <div>{q.examTitle || q.examId}</div>
-                          <div className="font-mono text-[12px] text-slate-500">{q.examId}</div>
-                        </td>
-                        <td className="p-3.5 text-slate-600 dark:text-slate-300">
-                          {q.questionNumber || '—'}
-                        </td>
-                        <td className="p-3.5 text-[13px] text-slate-700 dark:text-slate-300">
-                          {({
-                            OUT_OF_SYLLABUS: 'Out of syllabus',
-                            INCORRECT_QUESTION: 'Incorrect question',
-                            TYPO_ERROR: 'Typo/error',
-                            INCORRECT_OPTIONS: 'Incorrect options',
-                            MULTIPLE_OPTIONS_CORRECT: 'Multiple options appear correct',
-                            QUESTION_UNCLEAR: 'Question unclear',
-                            TECHNICAL_ISSUE: 'Technical issue',
-                            OTHER: 'Other',
-                            AMBIGUOUS_QUESTION: 'Ambiguous question',
-                            INCORRECT_KEY: 'Incorrect answer key',
-                            EVALUATION_ERROR: 'Evaluation error',
-                            TECHNICAL_GLITCH: 'Technical glitch'
-                          } as Record<StudentQuery['reasonType'], string>)[q.reasonType] || q.reasonType}
-                        </td>
-                        <td className="p-3.5 text-[13px] font-medium text-slate-600 dark:text-slate-300">
-                          {q.status}
-                        </td>
-                        <td className="p-3.5 text-[14px] text-slate-500 tabular-nums">
-                          {q.createdAt}
-                        </td>
-                        <td className="p-3.5 text-right whitespace-nowrap">
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedQueryDetail(q)}
-                              className="h-9 px-3 rounded-lg border border-blue-200 dark:border-blue-800 text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
-                            >
-                              Review
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-        </div>
-      )}
-
-      {/* 9. ANALYTICS TAB */}
-      {activeTab === 'analytics' && (
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-          <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white mb-4 leading-snug">
-            Subject Performance Analytics
-          </h2>
-          {masteryData.length === 0 ? (
-            <div className="py-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No results available.
-            </div>
-          ) : (
-            <TopicMasteryChart data={masteryData} />
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700"><div><h2 className="text-lg font-semibold text-slate-900 dark:text-white">Queries by exam</h2><p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Select an exam to load and review its queries.</p></div><input aria-label="Search exams" value={recordSearch} onChange={event => setRecordSearch(event.target.value)} placeholder="Search exams..." className="h-9 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" /></div>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">{pageExams.map(exam => <div key={exam.examId || exam.id} className="flex items-center justify-between gap-4 p-4"><div><p className="font-medium text-slate-900 dark:text-white">{exam.title}</p><p className="mt-1 font-mono text-xs text-slate-500">{exam.examId || exam.id} · {exam.subject} · {exam.status}</p></div><button type="button" onClick={() => void loadExamQueries(exam.examId || exam.id)} className="rounded-md border border-blue-200 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30">View</button></div>)}</div>
+              <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {examPageCount} · {matchingExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= examPageCount} onClick={() => setRecordPage(page => Math.min(examPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
+            </section>
           )}
         </div>
       )}
@@ -3719,7 +3860,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     </span>
                   </div>
                 </div>
-
+                <StudentAssessmentSections details={selectedStudentDetails} />
               </div>
             )}
         </Modal>
@@ -3860,16 +4001,32 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             variant: 'primary',
             action: async () => {
               await onPublishResult(id);
+              setExamResults(previous => previous.map(result =>
+                (result.resultId || result.id) === id
+                  ? { ...result, status: 'PUBLISHED', isPublished: true }
+                  : result
+              ));
             }
           });
         }}
         canPublish={true}
       />
 
+      {selectedProctoringExamId && (
+        <ProctoringExamInsightsModal
+          exam={exams.find(exam => (exam.examId || exam.id) === selectedProctoringExamId)}
+          examId={selectedProctoringExamId}
+          events={selectedFacultyProctoringEvents}
+          results={proctoringExamResults}
+          isStudent={false}
+          onClose={() => setSelectedProctoringExamId(null)}
+        />
+      )}
+
       <QueryDetailModal
         query={selectedQueryDetail}
         onClose={() => setSelectedQueryDetail(null)}
-        onResolve={onResolveQueryDetailed}
+        onResolve={resolveWorkspaceQuery}
       />
 
       {selectedMonitoringAttempt && (
@@ -3887,7 +4044,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             const assistance = assistanceRequests
               .filter(request => request.attemptId === attempt.attemptId)
               .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
-            const relatedQuery = queries.find(query => query.attemptId === attempt.attemptId);
             const totalQuestions = exam?.questionCount || exam?.questionIds?.length || attempt.answers.length;
             const answeredCount = attempt.answers.filter(answer => answer.selectedOption).length;
             const lastViolation = events.find(event =>
@@ -3954,7 +4110,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     Flagged: {attempt.answers.filter(answer => answer.markedForReview).length}
                   </div>
                   <div className="rounded-lg bg-slate-50 p-3 text-[13px] dark:bg-slate-900">
-                    Reported: {attempt.reportedQuestionIds?.length || queries.filter(query => query.attemptId === attempt.attemptId).length}
+                    Reported: {attempt.reportedQuestionIds?.length || 0}
                   </div>
                 </div>
                 <section className="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
@@ -3972,7 +4128,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       )}
                     </div>
                   ) : <p className="mt-2 text-sm text-slate-500">No assistance request for this attempt.</p>}
-                  {relatedQuery && <button type="button" onClick={() => { setSelectedMonitoringAttempt(null); setSelectedQueryDetail(relatedQuery); }} className="mt-3 rounded-md border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300">View reported question</button>}
+                  {(attempt.reportedQuestionIds?.length || 0) > 0 && <button type="button" onClick={() => { setSelectedMonitoringAttempt(null); void loadReportedQuery(attempt); }} className="mt-3 rounded-md border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300">View reported question</button>}
                 </section>
                 <div>
                   <h3 className="mb-2 text-[15px] font-semibold text-slate-900 dark:text-white">Event Timeline</h3>

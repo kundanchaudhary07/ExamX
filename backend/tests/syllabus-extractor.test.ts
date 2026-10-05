@@ -30,6 +30,14 @@ async function run(): Promise<void> {
   assert.equal(txt.fileType, 'TXT');
   assert(txt.text.includes('Processor organization'));
 
+  const longText = `UNIT I: Data structures\n${'Arrays use contiguous memory locations. '.repeat(500)}`;
+  const longTxt = await validateAndExtractSyllabus(file('long-syllabus.txt', 'text/plain', Buffer.from(longText)));
+  assert.equal(longTxt.text.length, longText.trim().length, 'Syllabus extraction must not silently truncate source content');
+  await assert.rejects(
+    validateAndExtractSyllabus(file('too-long-syllabus.txt', 'text/plain', Buffer.from(`${'word '.repeat(6_001)}`))),
+    (error: any) => error.statusCode === 413 && /maximum supported text length/.test(error.message)
+  );
+
   const pdfSource = `%PDF-1.4\n1 0 obj\n<< /Length 240 >>\nstream\nBT /F1 12 Tf 72 720 Td (${syllabusText}) Tj ET\nendstream\nendobj\n%%EOF`;
   const pdf = await validateAndExtractSyllabus(file('architecture.pdf', 'application/pdf', Buffer.from(pdfSource)));
   assert.equal(pdf.fileType, 'PDF');

@@ -30,7 +30,8 @@ import {
 } from '../../services/dbService';
 import { realtimeService } from '../../services/realtimeService';
 import { AiGenerationBatchCards } from './AiGenerationBatchCards';
-import { TopicMasteryChart } from '../Charts';
+import { ProctoringExamInsightsModal } from './ProctoringExamInsightsModal';
+import StudentAssessmentSections from './StudentAssessmentSections';
 import {
   Modal,
   FormSection,
@@ -110,7 +111,8 @@ interface AdminDashboardProps {
     publishResults?: boolean
   ) => Promise<void> | void;
   onResolveQuery: (queryId: string, response: string, status?: 'RESOLVED' | 'REJECTED') => Promise<void> | void;
-  onRefreshGlobalData?: () => Promise<void> | void;
+  onRefreshGlobalData?: () => Promise<boolean | void> | void;
+  onRefreshExamData?: (user: User) => Promise<boolean>;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -118,8 +120,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   activeTab,
   onNavigateTab,
   exams,
-  results,
-  queries,
   onSaveExam,
   onDeleteExam,
   onPublishResult,
@@ -133,11 +133,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [aiGenerationBatches, setAiGenerationBatches] = useState<AiGenerationBatch[]>([]);
   const [proctoringEvents, setProctoringEvents] = useState<ProctoringEventRecord[]>([]);
   const [attempts, setAttempts] = useState<ExamAttemptRecord[]>([]);
+  const [selectedResultExamId, setSelectedResultExamId] = useState<string | null>(null);
+  const [resultsExamSearch, setResultsExamSearch] = useState('');
+  const [resultRecordSearch, setResultRecordSearch] = useState('');
+  const [resultExamStatusFilter, setResultExamStatusFilter] = useState('ALL');
+  const [examResults, setExamResults] = useState<StudentResult[]>([]);
+  const [isLoadingResults, setIsLoadingResults] = useState(false);
+  const [resultsPage, setResultsPage] = useState(1);
+  const [selectedQueryExamId, setSelectedQueryExamId] = useState<string | null>(null);
+  const [queriesExamSearch, setQueriesExamSearch] = useState('');
+  const [queryRecordSearch, setQueryRecordSearch] = useState('');
+  const [queryExamStatusFilter, setQueryExamStatusFilter] = useState('ALL');
+  const [examQueries, setExamQueries] = useState<StudentQuery[]>([]);
+  const [isLoadingQueries, setIsLoadingQueries] = useState(false);
+  const [queriesPage, setQueriesPage] = useState(1);
+  const [isLoadingMonitoring, setIsLoadingMonitoring] = useState(false);
+  const [monitoringError, setMonitoringError] = useState<string | null>(null);
+  const [monitoringResults, setMonitoringResults] = useState<StudentResult[]>([]);
+  const [monitoringSearchTerm, setMonitoringSearchTerm] = useState('');
+  const [showMonitoringInsights, setShowMonitoringInsights] = useState(false);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [healthStatus, setHealthStatus] = useState<{ status: string; database: string } | null>(null);
   const { confirmAction, ConfirmModal } = useConfirmAction();
 
   const [isLoadingData, setIsLoadingData] = useState(true);
+  const refreshInProgressRef = React.useRef(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [queryStatusFilter, setQueryStatusFilter] = useState<'ALL' | 'PENDING' | 'RESOLVED'>('ALL');
@@ -214,6 +234,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedResultDetail, setSelectedResultDetail] = useState<StudentResult | null>(null);
   const [selectedQueryDetail, setSelectedQueryDetail] = useState<StudentQuery | null>(null);
   const [selectedProctoringDetail, setSelectedProctoringDetail] = useState<ProctoringEventRecord | null>(null);
+  const [selectedProctoringExamId, setSelectedProctoringExamId] = useState<string | null>(null);
   const [selectedAuditDetail, setSelectedAuditDetail] = useState<AuditLog | null>(null);
   const [assigningTeacherId, setAssigningTeacherId] = useState<string>('');
 
@@ -228,39 +249,113 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Feedback banner
   const [feedbackBanner, setFeedbackBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  const loadDirectoryAndLogs = useCallback(async (showLoading = true) => {
+  const loadDirectoryAndLogs = useCallback(async (showLoading = true): Promise<boolean> => {
     if (showLoading) setIsLoadingData(true);
     setLoadError(null);
     try {
-      const [teacherList, studentList, questionList, proctorList, logs, health, attemptList, generationBatches] = await Promise.all([
+      const [teacherList, studentList, questionList, logs, health, generationBatches] = await Promise.all([
         dbService.getTeachers(),
         dbService.getStudents(),
         dbService.getQuestions().catch(() => []),
-        dbService.getProctoringEvents().catch(() => []),
         dbService.getAuditLogs({ limit: 100 }).catch(() => []),
         fetch('/api/health')
           .then(r => r.json())
           .catch(() => ({ status: 'healthy', database: 'connected' })),
-        dbService.getAttempts().catch(() => []),
         dbService.getAiGenerationBatches()
       ]);
       setTeachers(teacherList);
       setStudents(studentList);
       setQuestions(questionList);
       setAiGenerationBatches(generationBatches);
-      setProctoringEvents(proctorList);
-      setAttempts(attemptList);
       setAuditLogs(logs);
       setHealthStatus({
         status: health?.status || 'healthy',
         database: health?.database || 'connected'
       });
+      return true;
     } catch (err: any) {
       setLoadError(err.message || 'Unable to load dashboard data.');
+      return false;
     } finally {
       if (showLoading) setIsLoadingData(false);
     }
   }, []);
+
+  const refreshExamMonitoringData = useCallback(async (examId: string): Promise<boolean> => {
+    setMonitoringError(null);
+    try {
+      const [attemptList, proctorList, resultList] = await Promise.all([
+        dbService.getAttempts(examId),
+        dbService.getProctoringEvents({ examId }),
+        dbService.getResults(examId).catch(() => [])
+      ]);
+      setAttempts(attemptList);
+      setProctoringEvents(proctorList);
+      setMonitoringResults(resultList);
+      return true;
+    } catch (error: any) {
+      setMonitoringError(error?.message || 'Unable to refresh examination monitoring data.');
+      return false;
+    }
+  }, []);
+
+  const handleManualRefresh = async () => {
+    if (refreshInProgressRef.current) return;
+    refreshInProgressRef.current = true;
+    try {
+      if (activeTab === 'results' && selectedResultExamId) {
+        setIsLoadingResults(true);
+        try {
+          const resultList = await dbService.getResults(selectedResultExamId);
+          setExamResults(resultList.filter(result => result.examId === selectedResultExamId));
+        } catch (error: any) {
+          setLoadError(error?.message || 'Unable to refresh results for this exam.');
+        } finally {
+          setIsLoadingResults(false);
+        }
+        return;
+      }
+      if (activeTab === 'queries' && selectedQueryExamId) {
+        setIsLoadingQueries(true);
+        try {
+          const queryList = await dbService.getQueries({ examId: selectedQueryExamId });
+          setExamQueries(queryList.filter(query => query.examId === selectedQueryExamId));
+        } catch (error: any) {
+          setLoadError(error?.message || 'Unable to refresh queries for this exam.');
+        } finally {
+          setIsLoadingQueries(false);
+        }
+        return;
+      }
+      if ((activeTab === 'proctoring' || activeTab === 'monitoring_history') && selectedProctoringExamId) {
+        await refreshExamMonitoringData(selectedProctoringExamId);
+        return;
+      }
+      const [directoryRefreshed, examsRefreshed] = await Promise.all([
+        loadDirectoryAndLogs(),
+        onRefreshGlobalData?.()
+      ]);
+      if (!directoryRefreshed || examsRefreshed === false) return;
+    } finally {
+      refreshInProgressRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    if (
+      activeTab !== 'proctoring' ||
+      !selectedProctoringExamId
+    ) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      if (refreshInProgressRef.current || realtimeService.isConnected()) return;
+      refreshInProgressRef.current = true;
+      void refreshExamMonitoringData(selectedProctoringExamId)
+        .finally(() => { refreshInProgressRef.current = false; });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, refreshExamMonitoringData, selectedProctoringExamId]);
 
   useEffect(() => {
     loadDirectoryAndLogs();
@@ -295,6 +390,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
       if (payload.event === 'monitoring.updated' && data?.attempt) {
         const attempt = data.attempt as ExamAttemptRecord;
+        if (!selectedProctoringExamId || attempt.examId !== selectedProctoringExamId) return;
+        setAttempts(previous => [
+          attempt,
+          ...previous.filter(item => item.attemptId !== attempt.attemptId)
+        ]);
+        return;
+      }
+      if (payload.event === 'attempt.suspended' && data?.attemptId) {
+        setAttempts(previous => previous.map(attempt =>
+          attempt.attemptId === data.attemptId
+            ? {
+                ...attempt,
+                suspended: true,
+                proctoringStatus: 'SUSPENDED',
+                warningCount: data.warningCount ?? attempt.warningCount
+              }
+            : attempt
+        ));
+        return;
+      }
+      if (payload.event === 'attempt.resumed' && data?.attemptId) {
+        setAttempts(previous => previous.map(attempt =>
+          attempt.attemptId === data.attemptId
+            ? { ...attempt, suspended: false, proctoringStatus: 'WARNED' }
+            : attempt
+        ));
+        return;
+      }
+      if (payload.event === 'unblock.updated' && data?.attempt) {
+        const attempt = data.attempt as ExamAttemptRecord;
+        if (!selectedProctoringExamId || attempt.examId !== selectedProctoringExamId) return;
         setAttempts(previous => [
           attempt,
           ...previous.filter(item => item.attemptId !== attempt.attemptId)
@@ -303,6 +429,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
       if (payload.event === 'proctoring.event' && data?.event) {
         const event = data.event as ProctoringEventRecord;
+        if (!selectedProctoringExamId || event.examId !== selectedProctoringExamId) return;
         setProctoringEvents(previous => [
           event,
           ...previous.filter(item => item.eventId !== event.eventId)
@@ -338,7 +465,94 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
     });
     return () => unsub();
-  }, []);
+  }, [selectedProctoringExamId]);
+
+  useEffect(() => {
+    if (!['proctoring', 'monitoring_history'].includes(activeTab) || !selectedProctoringExamId) return;
+    let active = true;
+    setIsLoadingMonitoring(true);
+    setMonitoringError(null);
+    Promise.all([
+      dbService.getAttempts(selectedProctoringExamId),
+      dbService.getProctoringEvents({ examId: selectedProctoringExamId }),
+      dbService.getResults(selectedProctoringExamId).catch(() => [])
+    ])
+      .then(([attemptList, eventList, resultList]) => {
+        if (!active) return;
+        setAttempts(attemptList);
+        setProctoringEvents(eventList);
+        setMonitoringResults(resultList);
+      })
+      .catch((error: any) => {
+        if (active) setMonitoringError(error?.message || 'Unable to load this exam’s monitoring data.');
+      })
+      .finally(() => {
+        if (active) setIsLoadingMonitoring(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeTab, selectedProctoringExamId]);
+
+  useEffect(() => {
+    if (activeTab !== 'results' || !selectedResultExamId) return;
+    let active = true;
+    setIsLoadingResults(true);
+    setLoadError(null);
+    setResultsPage(1);
+    dbService.getResults(selectedResultExamId)
+      .then(resultList => {
+        if (active) setExamResults(resultList.filter(result => result.examId === selectedResultExamId));
+      })
+      .catch((error: any) => {
+        if (active) {
+          setExamResults([]);
+          setLoadError(error?.message || 'Unable to load results for this exam.');
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingResults(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeTab, selectedResultExamId]);
+
+  useEffect(() => {
+    if (activeTab !== 'queries' || !selectedQueryExamId) return;
+    let active = true;
+    setIsLoadingQueries(true);
+    setLoadError(null);
+    setQueriesPage(1);
+    dbService.getQueries({ examId: selectedQueryExamId })
+      .then(queryList => {
+        if (active) setExamQueries(queryList.filter(query => query.examId === selectedQueryExamId));
+      })
+      .catch((error: any) => {
+        if (active) {
+          setExamQueries([]);
+          setLoadError(error?.message || 'Unable to load queries for this exam.');
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingQueries(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeTab, selectedQueryExamId]);
+
+  useEffect(
+    () =>
+      realtimeService.subscribeStatus(status => {
+        if (status.connected && status.reconnected) {
+          if (selectedProctoringExamId) {
+            void refreshExamMonitoringData(selectedProctoringExamId);
+          }
+        }
+      }),
+    [refreshExamMonitoringData, selectedProctoringExamId]
+  );
 
   const openCreateTeacherDialog = () => {
     setTeacherFormError(null);
@@ -754,7 +968,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       e.status === 'COMPLETED' ||
       e.status === 'RESULT_PUBLISHED'
   ).length;
-  const activeExamsCount = liveExamsCount + scheduledExamsCount;
 
   const activeQuestionsCount = questions.filter(q => q.status === 'ACTIVE' || !q.status).length;
   const draftQuestionsCount = questions.filter(q => q.status === 'DRAFT').length;
@@ -781,10 +994,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     new Set(questions.map(q => q.subject?.trim() || q.topic?.trim()).filter(Boolean))
   ).length;
 
-  const pendingQueriesCount = queries.filter(
+  const pendingQueriesCount = examQueries.filter(
     q => q.status === 'PENDING' || q.status === 'UNDER_REVIEW' || q.status === 'OPEN'
   ).length;
-  const resolvedQueriesCount = queries.filter(
+  const resolvedQueriesCount = examQueries.filter(
     q =>
       q.status === 'RESOLVED' ||
       q.status === 'APPROVED' ||
@@ -792,55 +1005,86 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       q.status === 'RESOLVED_ACCEPTED' ||
       q.status === 'RESOLVED_REJECTED'
   ).length;
-  const examsWithQueriesCount = Array.from(
-    new Set(queries.map(q => q.examId).filter(Boolean))
-  ).length;
-  const visibleQueries = queries.filter(query => {
+  const visibleQueries = examQueries.filter(query => {
     const pending = ['OPEN', 'PENDING', 'UNDER_REVIEW'].includes(query.status);
     const resolved = ['RESOLVED', 'APPROVED', 'REJECTED', 'RESOLVED_ACCEPTED', 'RESOLVED_REJECTED'].includes(query.status);
     return queryStatusFilter === 'ALL' || (queryStatusFilter === 'PENDING' ? pending : resolved);
   });
 
-  const publishedResultsCount = results.filter(
+  const publishedResultsCount = examResults.filter(
     r => r.status === 'PUBLISHED' || r.isPublished
   ).length;
-  const unpublishedResultsCount = results.length - publishedResultsCount;
-  const visibleResults = results.filter(result =>
+  const unpublishedResultsCount = examResults.length - publishedResultsCount;
+  const visibleResults = examResults.filter(result =>
     resultStatusFilter === 'ALL' ||
     (resultStatusFilter === 'PUBLISHED'
       ? result.isPublished || result.status === 'PUBLISHED'
       : !(result.isPublished || result.status === 'PUBLISHED'))
   );
-  const publishedResultsBySubject = (() => {
-    const groups: Record<string, { subject: string; total: number; submissions: number }> = {};
-    results.forEach(result => {
-      if (!result.isPublished && result.status !== 'PUBLISHED') return;
-      const subject = result.subject?.trim() || result.examTitle || 'Unspecified subject';
-      const group = groups[subject] || { subject, total: 0, submissions: 0 };
-      group.total += result.percentage ?? result.accuracy ?? 0;
-      group.submissions += 1;
-      groups[subject] = group;
-    });
-    return Object.values(groups).map(group => ({
-      subject: group.subject,
-      averagePercentage: Math.round(group.total / group.submissions),
-      submissions: group.submissions
-    }));
-  })();
-  const passedResultsCount = results.filter(
+  const passedResultsCount = examResults.filter(
     r => r.passed === true || (r.percentage ?? r.accuracy ?? 0) >= 40
   ).length;
 
   const criticalEventsCount = proctoringEvents.filter(
     e => e.severity === 'HIGH' || e.severity === 'CRITICAL'
   ).length;
+  const selectedExamProctoringEvents = proctoringEvents
+    .filter(event => event.examId === selectedProctoringExamId)
+    .sort((first, second) =>
+      new Date(second.timestamp).getTime() - new Date(first.timestamp).getTime()
+    );
+  const isMonitoringHistory = activeTab === 'monitoring_history';
+  const monitoringExamStatuses = !isMonitoringHistory
+    ? new Set(['LIVE'])
+    : new Set(['ENDED', 'CLOSED', 'COMPLETED', 'RESULT_PUBLISHED']);
+  const visibleMonitoringExams = exams.filter(exam => {
+    const matchesStatus = monitoringExamStatuses.has(exam.status);
+    const search = monitoringSearchTerm.trim().toLowerCase();
+    const matchesSearch = !search ||
+      `${exam.title} ${exam.examId} ${exam.subject || ''}`.toLowerCase().includes(search);
+    return matchesStatus && matchesSearch;
+  });
+  const selectedMonitoringExam = exams.find(exam => exam.examId === selectedProctoringExamId);
+  const normalizedResultsExamSearch = resultsExamSearch.trim().toLowerCase();
+  const visibleResultsExams = exams.filter(exam => {
+    const searchMatch = !normalizedResultsExamSearch ||
+      `${exam.title} ${exam.examId} ${exam.subject || ''}`.toLowerCase().includes(normalizedResultsExamSearch);
+    return searchMatch && (resultExamStatusFilter === 'ALL' || exam.status === resultExamStatusFilter);
+  });
+  const normalizedQueriesExamSearch = queriesExamSearch.trim().toLowerCase();
+  const visibleQueriesExams = exams.filter(exam => {
+    const searchMatch = !normalizedQueriesExamSearch ||
+      `${exam.title} ${exam.examId} ${exam.subject || ''}`.toLowerCase().includes(normalizedQueriesExamSearch);
+    return searchMatch && (queryExamStatusFilter === 'ALL' || exam.status === queryExamStatusFilter);
+  });
+  const normalizedResultRecordSearch = resultRecordSearch.trim().toLowerCase();
+  const searchedResults = visibleResults.filter(result =>
+    !normalizedResultRecordSearch ||
+    `${result.studentName} ${result.studentId} ${result.resultId || result.id}`.toLowerCase().includes(normalizedResultRecordSearch)
+  );
+  const normalizedQueryRecordSearch = queryRecordSearch.trim().toLowerCase();
+  const searchedQueries = visibleQueries.filter(query =>
+    !normalizedQueryRecordSearch ||
+    `${query.studentName} ${query.studentId} ${query.queryId || query.id} ${query.subject || query.topic || ''}`.toLowerCase().includes(normalizedQueryRecordSearch)
+  );
+  const pageSize = 10;
+  const resultsPageCount = Math.max(1, Math.ceil(searchedResults.length / pageSize));
+  const pagedResults = searchedResults.slice((resultsPage - 1) * pageSize, resultsPage * pageSize);
+  const queriesPageCount = Math.max(1, Math.ceil(searchedQueries.length / pageSize));
+  const pagedQueries = searchedQueries.slice((queriesPage - 1) * pageSize, queriesPage * pageSize);
+  useEffect(() => {
+    setResultsPage(page => Math.min(page, resultsPageCount));
+  }, [resultsPageCount]);
+  useEffect(() => {
+    setQueriesPage(page => Math.min(page, queriesPageCount));
+  }, [queriesPageCount]);
 
-  const activeAttemptsCount = attempts.filter(a => a.status === 'IN_PROGRESS').length;
-  const blockedAttemptsCount = attempts.filter(
-    a => a.status === 'TERMINATED' || a.proctoringStatus === 'TERMINATED'
-  ).length;
   const submittedAttemptsCount = attempts.filter(
-    a => a.status === 'SUBMITTED' || a.status === 'EVALUATED'
+    a =>
+      a.status === 'SUBMITTED' ||
+      a.status === 'AUTO_SUBMITTED' ||
+      a.status === 'EVALUATED' ||
+      a.status === 'FORCE_SUBMITTED'
   ).length;
 
   return (
@@ -855,8 +1099,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {activeTab === 'exams' && 'Exams'}
             {activeTab === 'questions' && 'Question Bank'}
             {activeTab === 'results' && 'Results'}
-            {activeTab === 'analytics' && 'Analytics'}
-            {activeTab === 'proctoring' && 'Proctoring'}
+            {activeTab === 'proctoring' && 'Live Monitoring'}
+            {activeTab === 'monitoring_history' && 'Monitoring History'}
             {activeTab === 'queries' && 'Queries'}
             {activeTab === 'audit' && 'Audit Logs'}
             {activeTab === 'settings' && 'Administrator Profile'}
@@ -869,10 +1113,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            onClick={() => {
-              loadDirectoryAndLogs();
-              if (onRefreshGlobalData) onRefreshGlobalData();
-            }}
+            onClick={() => void handleManualRefresh()}
+            disabled={isLoadingData}
             className="h-9 px-3.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 inline-flex items-center justify-center gap-1.5 transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoadingData ? 'animate-spin' : ''}`} />
@@ -975,8 +1217,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
             <KpiCard
               label="Pending Queries"
-              value={pendingQueriesCount}
-              subValue={`${resolvedQueriesCount} Resolved inquiries`}
+              value={selectedQueryExamId ? pendingQueriesCount : '—'}
+              subValue={selectedQueryExamId ? `${resolvedQueriesCount} Resolved inquiries` : 'Select an exam to review queries'}
               icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
               isLoading={isLoadingData}
               onClick={() => {
@@ -987,8 +1229,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
             <KpiCard
               label="Published Results"
-              value={publishedResultsCount}
-              subValue={`${unpublishedResultsCount} Pending publication`}
+              value={selectedResultExamId ? publishedResultsCount : '—'}
+              subValue={selectedResultExamId ? `${unpublishedResultsCount} Pending publication` : 'Select an exam to review results'}
               icon={<CheckCircle className="w-5 h-5 text-teal-600 dark:text-teal-400" />}
               isLoading={isLoadingData}
               onClick={() => {
@@ -998,9 +1240,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
 
             <KpiCard
-              label="Proctoring Events"
-              value={proctoringEvents.length}
-              subValue={`${criticalEventsCount} Critical / High`}
+              label="Live Exams"
+              value={liveExamsCount}
+              subValue="Open live monitoring for exam details"
               icon={<ShieldAlert className="w-5 h-5 text-rose-600 dark:text-rose-400" />}
               isLoading={isLoadingData}
               onClick={() => onNavigateTab('proctoring')}
@@ -1578,443 +1820,71 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* 6. RESULTS TAB */}
+      {/* Results: choose an exam before loading its records. */}
       {activeTab === 'results' && (
         <div className="space-y-6">
-          {/* Results KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard
-              label="Total Submissions"
-              value={results.length}
-              subValue="Evaluated attempts"
-              icon={<CheckCircle className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Published Results"
-              value={publishedResultsCount}
-              subValue="Available on student portal"
-              icon={<CheckCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Pending Publication"
-              value={unpublishedResultsCount}
-              subValue="Awaiting release"
-              icon={<AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Passing Grade"
-              value={passedResultsCount}
-              subValue={`${results.length - passedResultsCount} Below threshold`}
-              icon={<CheckCircle className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
-              isLoading={isLoadingData}
-            />
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-              <div className="flex w-full flex-wrap items-center justify-between gap-3">
-                <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                  Results ({visibleResults.length})
-                </h2>
-                <select
-                  aria-label="Filter results by publication status"
-                  value={resultStatusFilter}
-                  onChange={event => setResultStatusFilter(event.target.value as typeof resultStatusFilter)}
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                >
-                  <option value="ALL">All results</option>
-                  <option value="PUBLISHED">Published</option>
-                  <option value="PENDING">Pending publication</option>
-                </select>
+          {!selectedResultExamId ? (
+            <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+              <div className="flex flex-col gap-4 border-b border-slate-200 p-5 dark:border-slate-700 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Results by exam</h2>
+                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Select an exam to load and manage only its results.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <label className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                    <input aria-label="Search exams for results" value={resultsExamSearch} onChange={event => setResultsExamSearch(event.target.value)} placeholder="Search exams" className="h-9 w-56 rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" />
+                  </label>
+                  <select aria-label="Filter results exams by status" value={resultExamStatusFilter} onChange={event => setResultExamStatusFilter(event.target.value)} className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white">
+                    <option value="ALL">All exam statuses</option><option value="DRAFT">Draft</option><option value="SCHEDULED">Scheduled</option><option value="PUBLISHED">Published</option><option value="LIVE">Live</option><option value="ENDED">Ended</option><option value="COMPLETED">Completed</option><option value="RESULT_PUBLISHED">Results published</option>
+                  </select>
+                </div>
               </div>
-            {unpublishedResultsCount > 0 && (
-              <span className="text-[13.5px] font-medium text-amber-600 dark:text-amber-400">
-                {unpublishedResultsCount} pending publication
-              </span>
-            )}
-          </div>
-
-          {visibleResults.length === 0 ? (
-            <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              {results.length ? 'No results match this filter.' : 'No results available.'}
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="p-3.5 whitespace-nowrap">Result ID</th>
-                    <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Student</th>
-                    <th className="p-3.5">Score</th>
-                    <th className="p-3.5">Percentage</th>
-                    <th className="p-3.5">Status</th>
-                    <th className="p-3.5">Published At</th>
-                    <th className="p-3.5 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {visibleResults.map(r => {
-                    const isPublished = r.status === 'PUBLISHED';
-                    const rId = r.resultId || r.id;
-                    return (
-                      <tr key={rId} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                        <td className="p-3.5 whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedResultDetail(r)}
-                            className="font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline tabular-nums"
-                          >
-                            {rId}
-                          </button>
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-800 dark:text-slate-200">
-                            {r.examTitle || r.subject}
-                          </div>
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-900 dark:text-white">
-                            {r.studentName}
-                          </div>
-                          <div className="text-[13px] font-mono text-slate-500 tabular-nums">{r.studentId}</div>
-                        </td>
-                        <td className="p-3.5 font-medium text-slate-900 dark:text-white tabular-nums">
-                          {r.score} / {r.totalMarks || r.totalQuestions}
-                        </td>
-                        <td className="p-3.5 font-medium text-slate-700 dark:text-slate-300 tabular-nums">
-                          {r.percentage ?? r.accuracy ?? 0}%
-                        </td>
-                        <td className="p-3.5 text-[13px] font-medium text-slate-700 dark:text-slate-300">
-                          {r.status}
-                        </td>
-                        <td className="p-3.5 text-[14px] text-slate-500 tabular-nums">
-                          {r.publishedAt
-                            ? new Date(r.publishedAt).toLocaleDateString()
-                            : isPublished
-                            ? r.date
-                            : '—'}
-                        </td>
-                        <td className="p-3.5 text-right whitespace-nowrap space-x-2">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedResultDetail(r)}
-                            className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-[14px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                          >
-                            View
-                          </button>
-                          {!isPublished && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                confirmAction({
-                                  title: 'Publish Results',
-                                  message: `Are you sure you want to publish the results for ${r.studentName}?`,
-                                  confirmLabel: 'Yes, Publish',
-                                  cancelLabel: 'No',
-                                  variant: 'primary',
-                                  action: async () => {
-                                    await onPublishResult(rId);
-                                  }
-                                });
-                              }}
-                              className="h-9 px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[14px] font-medium"
-                            >
-                              Publish
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-        </div>
-      )}
-
-      {activeTab === 'analytics' && (
-        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
-          <h2 className="mb-2 text-[20px] font-semibold text-slate-900 dark:text-white">
-            Published performance by subject
-          </h2>
-          {publishedResultsBySubject.length === 0 ? (
-            <div className="py-12 text-center text-[14px] text-slate-500 dark:text-slate-400">
-              Publish examination results to view institution-wide performance patterns.
-            </div>
-          ) : (
-            <TopicMasteryChart data={publishedResultsBySubject} />
-          )}
-        </section>
-      )}
-
-      {/* 7. PROCTORING TAB */}
-      {activeTab === 'proctoring' && (
-        <div className="space-y-6">
-          {/* Proctoring KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard
-              label="Active Attempts"
-              value={activeAttemptsCount}
-              subValue="Live candidate examinations"
-              icon={<ShieldAlert className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Warning Events"
-              value={proctoringEvents.length}
-              subValue={`${criticalEventsCount} Threshold flagged`}
-              icon={<ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Blocked Attempts"
-              value={blockedAttemptsCount}
-              subValue="Terminated policy violations"
-              icon={<ShieldAlert className="w-5 h-5 text-rose-600 dark:text-rose-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Submitted Attempts"
-              value={submittedAttemptsCount}
-              subValue="Evaluated & completed"
-              icon={<CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
-              isLoading={isLoadingData}
-            />
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Proctoring ({proctoringEvents.length})
-              </h2>
-            </div>
-
-          {proctoringEvents.length === 0 ? (
-            <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No proctoring events.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="p-3.5">Event ID</th>
-                    <th className="p-3.5">Student</th>
-                    <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Type</th>
-                    <th className="p-3.5">Severity</th>
-                    <th className="p-3.5">Details</th>
-                    <th className="p-3.5">Timestamp</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {proctoringEvents.map(ev => (
-                    <tr
-                      key={ev.eventId}
-                      onClick={() => setSelectedProctoringDetail(ev)}
-                      className="hover:bg-slate-50 dark:hover:bg-slate-700/30 cursor-pointer transition-colors"
-                    >
-                      <td className="p-3.5 font-mono text-[14px] text-blue-600 dark:text-blue-400 font-medium tabular-nums hover:underline">
-                        {ev.eventId}
-                      </td>
-                      <td className="p-3.5">
-                        <div className="font-medium text-slate-900 dark:text-white">{ev.studentName || ev.studentId}</div>
-                        <div className="font-mono text-[13px] text-slate-500 tabular-nums">{ev.studentId}</div>
-                      </td>
-                      <td className="p-3.5 text-slate-600 dark:text-slate-300">
-                        {ev.examTitle || ev.examId}
-                      </td>
-                      <td className="p-3.5 font-medium text-slate-800 dark:text-slate-200">
-                        {ev.eventType}
-                      </td>
-                      <td className="p-3.5">
-                        <StatusBadge status={ev.severity} />
-                      </td>
-                      <td className="p-3.5 text-slate-600 dark:text-slate-300 max-w-xs truncate">{ev.details}</td>
-                      <td className="p-3.5 text-[14px] text-slate-500 tabular-nums whitespace-nowrap">
-                        {new Date(ev.timestamp).toLocaleString()}
-                      </td>
-                    </tr>
+              {visibleResultsExams.length ? (
+                <div className="divide-y divide-slate-200 dark:divide-slate-700">
+                  {visibleResultsExams.map(exam => (
+                    <button key={exam.examId} type="button" onClick={() => { setExamResults([]); setSelectedResultExamId(exam.examId); }} className="flex w-full flex-col gap-2 p-5 text-left hover:bg-slate-50 dark:hover:bg-slate-700/30 sm:flex-row sm:items-center sm:justify-between">
+                      <span><span className="block font-semibold text-slate-900 dark:text-white">{exam.title}</span><span className="mt-1 block text-sm text-slate-500 dark:text-slate-400">{exam.subject || 'Unspecified subject'} · {exam.examId}</span></span>
+                      <span className="flex items-center gap-3"><StatusBadge status={exam.status} /><span className="text-sm font-semibold text-blue-600 dark:text-blue-400">View results →</span></span>
+                    </button>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                </div>
+              ) : <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">No exams match your search and status filters.</div>}
+            </section>
+          ) : (() => {
+            const exam = exams.find(item => item.examId === selectedResultExamId);
+            return <div className="space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><button type="button" onClick={() => { setSelectedResultExamId(null); setExamResults([]); setResultsPage(1); }} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← All exams</button><h2 className="text-xl font-semibold text-slate-900 dark:text-white">{exam?.title || selectedResultExamId}</h2><p className="text-sm text-slate-500 dark:text-slate-400">Results workspace · {selectedResultExamId}</p></div>
+                <div className="flex items-center gap-2"><label className="relative"><Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input aria-label="Search results" value={resultRecordSearch} onChange={event => { setResultRecordSearch(event.target.value); setResultsPage(1); }} placeholder="Search students or IDs" className="h-9 w-56 rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" /></label><select aria-label="Filter results by publication status" value={resultStatusFilter} onChange={event => { setResultStatusFilter(event.target.value as typeof resultStatusFilter); setResultsPage(1); }} className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white"><option value="ALL">All results</option><option value="PUBLISHED">Published</option><option value="PENDING">Pending publication</option></select></div>
+              </div>
+              {loadError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">{loadError}</p>}
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4"><KpiCard label="Submissions" value={examResults.length} subValue="For this exam" icon={<CheckCircle className="h-5 w-5 text-blue-600" />} isLoading={isLoadingResults} /><KpiCard label="Published" value={publishedResultsCount} subValue="Available to students" icon={<CheckCircle className="h-5 w-5 text-emerald-600" />} isLoading={isLoadingResults} /><KpiCard label="Pending publication" value={unpublishedResultsCount} subValue="Awaiting release" icon={<AlertCircle className="h-5 w-5 text-amber-600" />} isLoading={isLoadingResults} /><KpiCard label="Passed" value={passedResultsCount} subValue="40% threshold or higher" icon={<CheckCircle className="h-5 w-5 text-indigo-600" />} isLoading={isLoadingResults} /></div>
+              <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+                <div className="border-b border-slate-200 p-4 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300">{searchedResults.length} result{searchedResults.length === 1 ? '' : 's'} for this exam</div>
+                {isLoadingResults ? <div className="p-10 text-center text-sm text-slate-500">Loading exam results…</div> : searchedResults.length === 0 ? <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">{examResults.length ? 'No results match the current filters.' : 'No results are available for this exam.'}</div> : <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold text-slate-500 dark:bg-slate-900/50 dark:text-slate-400"><tr><th className="p-3">Result</th><th className="p-3">Student</th><th className="p-3">Score</th><th className="p-3">Percentage</th><th className="p-3">Status</th><th className="p-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-200 dark:divide-slate-700">{pagedResults.map(result => { const resultId = result.resultId || result.id; const isPublished = result.isPublished || result.status === 'PUBLISHED'; return <tr key={resultId}><td className="p-3"><button type="button" onClick={() => setSelectedResultDetail(result)} className="font-mono text-blue-600 hover:underline dark:text-blue-400">{resultId}</button></td><td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{result.studentName}</div><div className="text-xs text-slate-500">{result.studentId}</div></td><td className="p-3">{result.score} / {result.totalMarks || result.totalQuestions}</td><td className="p-3">{result.percentage ?? result.accuracy ?? 0}%</td><td className="p-3"><StatusBadge status={result.status} /></td><td className="space-x-2 p-3 text-right"><button type="button" onClick={() => setSelectedResultDetail(result)} className="rounded-md border border-slate-200 px-3 py-1.5 text-xs dark:border-slate-600">View</button>{!isPublished && <button type="button" onClick={() => confirmAction({ title: 'Publish Results', message: `Are you sure you want to publish the results for ${result.studentName}?`, confirmLabel: 'Yes, Publish', cancelLabel: 'No', variant: 'primary', action: async () => { await onPublishResult(resultId); const publishedAt = new Date().toISOString(); setExamResults(previous => previous.map(item => (item.resultId || item.id) === resultId ? { ...item, isPublished: true, status: 'PUBLISHED', publishedAt } : item)); setSelectedResultDetail(previous => previous && (previous.resultId || previous.id) === resultId ? { ...previous, isPublished: true, status: 'PUBLISHED', publishedAt } : previous); } })} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">Publish</button>}</td></tr>; })}</tbody></table></div>}
+                {resultsPageCount > 1 && <div className="flex items-center justify-between border-t border-slate-200 p-3 text-sm dark:border-slate-700"><span>Page {resultsPage} of {resultsPageCount}</span><div className="flex gap-2"><button type="button" disabled={resultsPage <= 1} onClick={() => setResultsPage(page => Math.max(1, page - 1))} className="rounded border px-3 py-1 disabled:opacity-40 dark:border-slate-600">Previous</button><button type="button" disabled={resultsPage >= resultsPageCount} onClick={() => setResultsPage(page => Math.min(resultsPageCount, page + 1))} className="rounded border px-3 py-1 disabled:opacity-40 dark:border-slate-600">Next</button></div></div>}
+              </section>
+            </div>;
+          })()}
         </div>
       )}
 
-      {/* 8. QUERIES TAB */}
+      {/* Proctoring is split into current live operations and exam-scoped history. */}
+      {(activeTab === 'proctoring' || activeTab === 'monitoring_history') && (
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-slate-900 dark:text-white">Exam monitoring</h2><p className="text-sm text-slate-500 dark:text-slate-400">Choose an exam to load its attempts and proctoring events.</p></div><div className="inline-flex rounded-lg border border-slate-200 bg-white p-1 dark:border-slate-700 dark:bg-slate-800"><button type="button" onClick={() => onNavigateTab(activeTab === 'monitoring_history' ? 'proctoring' : 'monitoring_history')} className="rounded-md px-3 py-1.5 text-sm font-medium bg-blue-600 text-white">{isMonitoringHistory ? 'Live monitoring' : 'Monitoring history'}</button></div></div>
+          {!selectedProctoringExamId ? <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700"><h3 className="font-semibold text-slate-900 dark:text-white">{isMonitoringHistory ? 'Ended and completed exams' : 'Currently live exams'}</h3><label className="relative"><Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input aria-label="Search monitoring exams" value={monitoringSearchTerm} onChange={event => setMonitoringSearchTerm(event.target.value)} placeholder="Search exams" className="h-9 w-56 rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" /></label></div>{visibleMonitoringExams.length ? <div className="divide-y divide-slate-200 dark:divide-slate-700">{visibleMonitoringExams.map(exam => <button key={exam.examId} type="button" onClick={() => { setProctoringEvents([]); setAttempts([]); setMonitoringResults([]); setSelectedProctoringExamId(exam.examId); setShowMonitoringInsights(false); setSelectedProctoringDetail(null); }} className="flex w-full flex-col gap-2 p-5 text-left hover:bg-slate-50 dark:hover:bg-slate-700/30 sm:flex-row sm:items-center sm:justify-between"><span><span className="block font-semibold text-slate-900 dark:text-white">{exam.title}</span><span className="mt-1 block text-sm text-slate-500 dark:text-slate-400">{exam.subject || 'Unspecified subject'} · {exam.examId}</span></span><span className="flex items-center gap-3"><StatusBadge status={exam.status} /><span className="text-sm font-semibold text-blue-600 dark:text-blue-400">Open {isMonitoringHistory ? 'report' : 'monitor'} →</span></span></button>)}</div> : <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">{isMonitoringHistory ? 'No ended or completed exams are available.' : 'No exams are currently live.'}</div>}</section> : <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><button type="button" onClick={() => { setSelectedProctoringExamId(null); setProctoringEvents([]); setAttempts([]); setMonitoringResults([]); setSelectedProctoringDetail(null); setShowMonitoringInsights(false); setSelectedProctoringDetail(null); }} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← {isMonitoringHistory ? 'Monitoring history' : 'Live exams'}</button><h3 className="text-xl font-semibold text-slate-900 dark:text-white">{selectedMonitoringExam?.title || selectedProctoringExamId}</h3><p className="text-sm text-slate-500 dark:text-slate-400">{selectedMonitoringExam?.subject || 'Exam'} · {selectedProctoringExamId}</p></div><div className="flex gap-2"><button type="button" onClick={() => void refreshExamMonitoringData(selectedProctoringExamId)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700"><RefreshCw className="h-4 w-4" />Refresh</button><button type="button" onClick={() => setShowMonitoringInsights(true)} className="h-9 rounded-lg bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700">View exam report</button></div></div>{monitoringError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">{monitoringError}</p>}{isLoadingMonitoring ? <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800">Loading exam monitoring data…</div> : <><div className="grid grid-cols-2 gap-3 md:grid-cols-4"><KpiCard label="Active attempts" value={attempts.filter(attempt => attempt.status === 'IN_PROGRESS').length} subValue="Currently in progress" icon={<ShieldAlert className="h-5 w-5 text-blue-600" />} /><KpiCard label="Proctoring events" value={selectedExamProctoringEvents.length} subValue="Only this exam" icon={<Activity className="h-5 w-5 text-amber-600" />} /><KpiCard label="High / critical" value={criticalEventsCount} subValue="Events requiring review" icon={<ShieldAlert className="h-5 w-5 text-rose-600" />} /><KpiCard label="Submitted attempts" value={submittedAttemptsCount} subValue="Completed submissions" icon={<CheckCircle className="h-5 w-5 text-emerald-600" />} /></div><section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><h4 className="border-b border-slate-200 p-4 font-semibold text-slate-900 dark:border-slate-700 dark:text-white">Candidate attempts ({attempts.length})</h4>{attempts.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-500 dark:bg-slate-900/50 dark:text-slate-400"><tr><th className="p-3">Student</th><th className="p-3">Status</th><th className="p-3">Warnings</th><th className="p-3 text-right">Action</th></tr></thead><tbody className="divide-y divide-slate-200 dark:divide-slate-700">{attempts.filter(attempt => attempt.examId === selectedProctoringExamId).map(attempt => <tr key={attempt.attemptId}><td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{attempt.studentName || attempt.studentId}</div><div className="text-xs text-slate-500">{attempt.studentId}</div></td><td className="p-3"><StatusBadge status={attempt.proctoringStatus || attempt.status} /></td><td className="p-3">{attempt.warningCount ?? 0}</td><td className="p-3 text-right">{attempt.status === 'IN_PROGRESS' && <button type="button" onClick={() => handleTerminateAttempt(attempt.attemptId, attempt.studentName)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300">Terminate</button>}</td></tr>)}</tbody></table></div> : <div className="p-8 text-center text-sm text-slate-500">No candidate attempts for this exam.</div>}</section><section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><h4 className="border-b border-slate-200 p-4 font-semibold text-slate-900 dark:border-slate-700 dark:text-white">Event history ({selectedExamProctoringEvents.length})</h4>{selectedExamProctoringEvents.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-500 dark:bg-slate-900/50 dark:text-slate-400"><tr><th className="p-3">Time</th><th className="p-3">Student</th><th className="p-3">Event</th><th className="p-3">Severity</th><th className="p-3 text-right">Details</th></tr></thead><tbody className="divide-y divide-slate-200 dark:divide-slate-700">{selectedExamProctoringEvents.slice(0, 100).map(event => <tr key={event.eventId}><td className="whitespace-nowrap p-3 text-slate-500">{new Date(event.timestamp).toLocaleString()}</td><td className="p-3">{event.studentName || event.studentId}</td><td className="p-3">{event.eventType}</td><td className="p-3"><StatusBadge status={event.severity} /></td><td className="p-3 text-right"><button type="button" onClick={() => setSelectedProctoringDetail(event)} className="font-medium text-blue-600 hover:underline dark:text-blue-400">Review</button></td></tr>)}</tbody></table></div> : <div className="p-8 text-center text-sm text-slate-500">No proctoring events for this exam.</div>}</section></>}</div>}
+          {showMonitoringInsights && selectedProctoringExamId && <ProctoringExamInsightsModal exam={selectedMonitoringExam} examId={selectedProctoringExamId} events={selectedExamProctoringEvents} results={monitoringResults} isStudent={false} onClose={() => setShowMonitoringInsights(false)} />}
+        </div>
+      )}
+
+      {/* Queries: choose an exam before loading its records. */}
       {activeTab === 'queries' && (
         <div className="space-y-6">
-          {/* Queries KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard
-              label="Total Queries"
-              value={queries.length}
-              subValue="All inquiries logged"
-              icon={<MessageSquare className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Pending Adjudication"
-              value={pendingQueriesCount}
-              subValue="Requires resolution"
-              icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Resolved Queries"
-              value={resolvedQueriesCount}
-              subValue="Successfully closed"
-              icon={<CheckCircle className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />}
-              isLoading={isLoadingData}
-            />
-            <KpiCard
-              label="Exams with Inquiries"
-              value={examsWithQueriesCount}
-              subValue="Distinct exams queried"
-              icon={<FileText className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
-              isLoading={isLoadingData}
-            />
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-6 dark:border-slate-700">
-              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Queries ({visibleQueries.length})
-              </h2>
-              <select
-                aria-label="Filter queries by status"
-                value={queryStatusFilter}
-                onChange={event => setQueryStatusFilter(event.target.value as typeof queryStatusFilter)}
-                className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-              >
-                <option value="ALL">All statuses</option>
-                <option value="PENDING">Pending / in review</option>
-                <option value="RESOLVED">Resolved</option>
-              </select>
-            </div>
-          {visibleQueries.length === 0 ? (
-            <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              {queries.length ? 'No queries match this filter.' : 'No queries yet.'}
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="p-3.5 whitespace-nowrap">Query ID</th>
-                    <th className="p-3.5">Student</th>
-                    <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Subject</th>
-                    <th className="p-3.5">Status</th>
-                    <th className="p-3.5">Created</th>
-                    <th className="p-3.5 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {visibleQueries.map(q => {
-                    const qKey = q.queryId || q.id;
-                    const isPending = q.status === 'PENDING' || q.status === 'UNDER_REVIEW';
-                    return (
-                      <tr key={qKey} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                        <td className="p-3.5 whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedQueryDetail(q)}
-                            className="font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:underline tabular-nums"
-                          >
-                            {qKey}
-                          </button>
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-900 dark:text-white">{q.studentName}</div>
-                          <div className="text-[13px] font-mono text-slate-500 tabular-nums">{q.studentId}</div>
-                        </td>
-                        <td className="p-3.5 text-slate-600 dark:text-slate-300">
-                          {q.examTitle || q.examId || '—'}
-                        </td>
-                        <td className="p-3.5">
-                          <div className="font-medium text-slate-900 dark:text-white">{q.subject || q.topic}</div>
-                          <div className="text-[13px] text-slate-500 line-clamp-1">{q.description || q.message}</div>
-                        </td>
-                        <td className="p-3.5 text-[13px] font-medium text-slate-700 dark:text-slate-300">
-                          {q.status}
-                        </td>
-                        <td className="p-3.5 text-[14px] text-slate-500 tabular-nums">{q.createdAt}</td>
-                        <td className="p-3.5 text-right whitespace-nowrap">
-                          {isPending ? (
-                            <div className="inline-flex items-center gap-2">
-                              <input
-                                type="text"
-                                placeholder="Write response..."
-                                value={replyText[qKey] || ''}
-                                onChange={e =>
-                                  setReplyText(prev => ({ ...prev, [qKey]: e.target.value }))
-                                }
-                                className="w-52 h-10 px-3 text-[14px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white outline-none"
-                              />
-                              <button
-                                type="button"
-                                disabled={submittingQueryId === qKey || !(replyText[qKey] || '').trim()}
-                                onClick={() => {
-                                  const reply = (replyText[qKey] || '').trim();
-                                  if (!reply) return;
-                                  confirmAction({
-                                    title: 'Resolve Query',
-                                    subtitle: `Query ID: ${qKey}`,
-                                    message: `Are you sure you want to send this resolution to ${q.studentName || 'the student'}?`,
-                                    confirmLabel: 'Yes, Resolve',
-                                    cancelLabel: 'No',
-                                    variant: 'primary',
-                                    details: [
-                                      { label: 'Student', value: q.studentName },
-                                      { label: 'Subject', value: q.subject || q.topic || 'General' },
-                                      { label: 'Response', value: reply }
-                                    ],
-                                    action: async () => {
-                                      setSubmittingQueryId(qKey);
-                                      try {
-                                        await onResolveQuery(qKey, reply, 'RESOLVED');
-                                      } finally {
-                                        setSubmittingQueryId(null);
-                                      }
-                                    }
-                                  });
-                                }}
-                                className="h-10 px-3.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-[14px] font-medium"
-                              >
-                                Resolve
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => setSelectedQueryDetail(q)}
-                              className="h-9 px-3 rounded-lg border border-slate-200 dark:border-slate-700 text-[14px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                            >
-                              View
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+          {!selectedQueryExamId ? <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><div className="flex flex-col gap-4 border-b border-slate-200 p-5 dark:border-slate-700 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold text-slate-900 dark:text-white">Queries by exam</h2><p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Select an exam to load and resolve only its queries.</p></div><div className="flex flex-wrap gap-2"><label className="relative"><Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input aria-label="Search exams for queries" value={queriesExamSearch} onChange={event => setQueriesExamSearch(event.target.value)} placeholder="Search exams" className="h-9 w-56 rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" /></label><select aria-label="Filter query exams by status" value={queryExamStatusFilter} onChange={event => setQueryExamStatusFilter(event.target.value)} className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white"><option value="ALL">All exam statuses</option><option value="DRAFT">Draft</option><option value="SCHEDULED">Scheduled</option><option value="PUBLISHED">Published</option><option value="LIVE">Live</option><option value="ENDED">Ended</option><option value="COMPLETED">Completed</option><option value="RESULT_PUBLISHED">Results published</option></select></div></div>{visibleQueriesExams.length ? <div className="divide-y divide-slate-200 dark:divide-slate-700">{visibleQueriesExams.map(exam => <button key={exam.examId} type="button" onClick={() => { setExamQueries([]); setSelectedQueryExamId(exam.examId); }} className="flex w-full flex-col gap-2 p-5 text-left hover:bg-slate-50 dark:hover:bg-slate-700/30 sm:flex-row sm:items-center sm:justify-between"><span><span className="block font-semibold text-slate-900 dark:text-white">{exam.title}</span><span className="mt-1 block text-sm text-slate-500 dark:text-slate-400">{exam.subject || 'Unspecified subject'} · {exam.examId}</span></span><span className="flex items-center gap-3"><StatusBadge status={exam.status} /><span className="text-sm font-semibold text-blue-600 dark:text-blue-400">View queries →</span></span></button>)}</div> : <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">No exams match your search and status filters.</div>}</section> : (() => { const exam = exams.find(item => item.examId === selectedQueryExamId); return <div className="space-y-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><button type="button" onClick={() => { setSelectedQueryExamId(null); setExamQueries([]); setQueriesPage(1); }} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← All exams</button><h2 className="text-xl font-semibold text-slate-900 dark:text-white">{exam?.title || selectedQueryExamId}</h2><p className="text-sm text-slate-500 dark:text-slate-400">Queries workspace · {selectedQueryExamId}</p></div><div className="flex flex-wrap gap-2"><label className="relative"><Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input aria-label="Search queries" value={queryRecordSearch} onChange={event => { setQueryRecordSearch(event.target.value); setQueriesPage(1); }} placeholder="Search students or topics" className="h-9 w-56 rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" /></label><select aria-label="Filter queries by status" value={queryStatusFilter} onChange={event => { setQueryStatusFilter(event.target.value as typeof queryStatusFilter); setQueriesPage(1); }} className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white"><option value="ALL">All statuses</option><option value="PENDING">Pending / in review</option><option value="RESOLVED">Resolved</option></select></div></div>{loadError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">{loadError}</p>}<div className="grid grid-cols-2 gap-3 md:grid-cols-3"><KpiCard label="Queries" value={examQueries.length} subValue="For this exam" icon={<MessageSquare className="h-5 w-5 text-blue-600" />} isLoading={isLoadingQueries} /><KpiCard label="Pending" value={pendingQueriesCount} subValue="Requires resolution" icon={<MessageSquare className="h-5 w-5 text-amber-600" />} isLoading={isLoadingQueries} /><KpiCard label="Resolved" value={resolvedQueriesCount} subValue="Closed inquiries" icon={<CheckCircle className="h-5 w-5 text-emerald-600" />} isLoading={isLoadingQueries} /></div><section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><div className="border-b border-slate-200 p-4 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300">{searchedQueries.length} quer{searchedQueries.length === 1 ? 'y' : 'ies'} for this exam</div>{isLoadingQueries ? <div className="p-10 text-center text-sm text-slate-500">Loading exam queries…</div> : searchedQueries.length === 0 ? <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">{examQueries.length ? 'No queries match the current filters.' : 'No queries have been raised for this exam.'}</div> : <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold text-slate-500 dark:bg-slate-900/50 dark:text-slate-400"><tr><th className="p-3">Query</th><th className="p-3">Student</th><th className="p-3">Subject / query</th><th className="p-3">Status</th><th className="p-3">Created</th><th className="p-3 text-right">Resolution</th></tr></thead><tbody className="divide-y divide-slate-200 dark:divide-slate-700">{pagedQueries.map(query => { const queryId = query.queryId || query.id; const isPending = ['OPEN', 'PENDING', 'UNDER_REVIEW'].includes(query.status); return <tr key={queryId}><td className="p-3"><button type="button" onClick={() => setSelectedQueryDetail(query)} className="font-mono text-blue-600 hover:underline dark:text-blue-400">{queryId}</button></td><td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{query.studentName}</div><div className="text-xs text-slate-500">{query.studentId}</div></td><td className="max-w-sm p-3"><div className="font-medium text-slate-900 dark:text-white">{query.subject || query.topic || 'General'}</div><div className="line-clamp-2 text-xs text-slate-500">{query.description || query.message}</div></td><td className="p-3"><StatusBadge status={query.status} /></td><td className="whitespace-nowrap p-3 text-slate-500">{query.createdAt}</td><td className="p-3 text-right">{isPending ? <div className="inline-flex items-center gap-2"><input type="text" aria-label={`Response to ${queryId}`} placeholder="Write response…" value={replyText[queryId] || ''} onChange={event => setReplyText(previous => ({ ...previous, [queryId]: event.target.value }))} className="h-9 w-44 rounded-lg border border-slate-200 bg-white px-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" /><button type="button" disabled={submittingQueryId === queryId || !(replyText[queryId] || '').trim()} onClick={() => { const reply = (replyText[queryId] || '').trim(); if (!reply) return; confirmAction({ title: 'Resolve Query', subtitle: `Query ID: ${queryId}`, message: `Send this resolution to ${query.studentName || 'the student'}?`, confirmLabel: 'Yes, Resolve', cancelLabel: 'No', variant: 'primary', details: [{ label: 'Student', value: query.studentName }, { label: 'Subject', value: query.subject || query.topic || 'General' }, { label: 'Response', value: reply }], action: async () => { setSubmittingQueryId(queryId); try { await onResolveQuery(queryId, reply, 'RESOLVED'); setExamQueries(previous => previous.map(item => (item.queryId || item.id) === queryId ? { ...item, status: 'RESOLVED' } : item)); setReplyText(previous => ({ ...previous, [queryId]: '' })); } finally { setSubmittingQueryId(null); } } }); }} className="h-9 rounded-lg bg-blue-600 px-3 text-xs font-medium text-white disabled:opacity-50">{submittingQueryId === queryId ? 'Sending…' : 'Resolve'}</button></div> : <span className="text-xs text-slate-500">Resolved</span>}</td></tr>; })}</tbody></table></div>}{queriesPageCount > 1 && <div className="flex items-center justify-between border-t border-slate-200 p-3 text-sm dark:border-slate-700"><span>Page {queriesPage} of {queriesPageCount}</span><div className="flex gap-2"><button type="button" disabled={queriesPage <= 1} onClick={() => setQueriesPage(page => Math.max(1, page - 1))} className="rounded border px-3 py-1 disabled:opacity-40 dark:border-slate-600">Previous</button><button type="button" disabled={queriesPage >= queriesPageCount} onClick={() => setQueriesPage(page => Math.min(queriesPageCount, page + 1))} className="rounded border px-3 py-1 disabled:opacity-40 dark:border-slate-600">Next</button></div></div>}</section></div>; })()}
         </div>
       )}
-
       {/* 9. AUDIT LOGS TAB */}
       {activeTab === 'audit' && (
         <div className="space-y-6">
@@ -2118,7 +1988,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => void Promise.all([loadDirectoryAndLogs(), onRefreshGlobalData?.()])}
+              onClick={() => void handleManualRefresh()}
               className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
             >
               <RefreshCw className="h-3.5 w-3.5" /> Refresh
@@ -2910,7 +2780,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </span>
                   </div>
                 </div>
-
+                <StudentAssessmentSections details={selectedStudentDetails} />
               </div>
             )}
         </Modal>

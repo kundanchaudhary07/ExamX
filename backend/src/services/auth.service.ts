@@ -1,5 +1,9 @@
 import { User } from '../models/User';
-import { hashPassword, verifyPassword } from '../utils/password';
+import {
+  createInitialPasswordCredential,
+  hashPassword,
+  verifyPassword
+} from '../utils/password';
 import { signToken } from '../utils/token';
 import { logger } from '../utils/logger';
 import { AuditService } from './audit.service';
@@ -9,7 +13,6 @@ import {
   TEACHER_ID_REGEX,
   STUDENT_ID_REGEX,
   createStudentWithGeneratedId,
-  generateInitialPassword,
   isValidTeacherId,
   validateDateOfBirth
 } from '../utils/credential.generator';
@@ -91,8 +94,7 @@ export class AuthService {
       throw error;
     }
 
-    const initialPassword = generateInitialPassword(name, dobYear);
-    const passwordHash = await hashPassword(initialPassword);
+    const initialCredential = await createInitialPasswordCredential(name, dobYear);
     let student;
     try {
       student = await createStudentWithGeneratedId(studentId =>
@@ -103,7 +105,7 @@ export class AuthService {
           phone,
           dob,
           dobYear,
-          passwordHash,
+          passwordHash: initialCredential.passwordHash,
           role: 'STUDENT',
           status: 'ACTIVE',
           department,
@@ -138,7 +140,7 @@ export class AuthService {
     logger.info(`Student self-signup completed: ${student.userId}`);
     return {
       user: student.toJSON(),
-      credentials: { studentId: student.userId, initialPassword }
+      credentials: { studentId: student.userId, initialPassword: initialCredential.password }
     };
   }
 

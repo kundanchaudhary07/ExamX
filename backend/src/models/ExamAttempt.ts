@@ -1,6 +1,13 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
-export type AttemptStatus = 'IN_PROGRESS' | 'SUBMITTED' | 'EXPIRED' | 'EVALUATED' | 'TERMINATED';
+export type AttemptStatus =
+  | 'IN_PROGRESS'
+  | 'SUBMITTED'
+  | 'AUTO_SUBMITTED'
+  | 'EXPIRED'
+  | 'EVALUATED'
+  | 'TERMINATED'
+  | 'FORCE_SUBMITTED';
 export type ProctoringStatus = 'CLEAN' | 'WARNED' | 'FLAGGED' | 'SUSPENDED' | 'TERMINATED';
 
 export interface IAttemptAnswer {
@@ -20,6 +27,7 @@ export interface IExamAttemptDocument extends Document {
   startedAt: Date;
   expiresAt: Date;
   submittedAt?: Date;
+  forceEndNotifiedAt?: Date;
   status: AttemptStatus;
   answers: IAttemptAnswer[];
   score: number;
@@ -92,9 +100,20 @@ const ExamAttemptSchema = new Schema<IExamAttemptDocument>(
     submittedAt: {
       type: Date
     },
+    forceEndNotifiedAt: {
+      type: Date
+    },
     status: {
       type: String,
-      enum: ['IN_PROGRESS', 'SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED'],
+      enum: [
+        'IN_PROGRESS',
+        'SUBMITTED',
+        'AUTO_SUBMITTED',
+        'EXPIRED',
+        'EVALUATED',
+        'TERMINATED',
+        'FORCE_SUBMITTED'
+      ],
       default: 'IN_PROGRESS',
       index: true
     },

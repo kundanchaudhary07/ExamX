@@ -66,7 +66,8 @@ export interface GroqContentClient {
   chat: {
     completions: {
       create(request: any): Promise<{
-        choices?: Array<{ message?: { content?: string | null } }>;
+        choices?: Array<{ finish_reason?: string | null; message?: { content?: string | null } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
       }>;
     };
   };
@@ -75,7 +76,8 @@ export interface GroqContentClient {
 type AiProvider = 'GROQ';
 type AiProviderClient = GroqContentClient;
 type GenerationProviderResponse = {
-  choices?: Array<{ message?: { content?: string | null } }>;
+  choices?: Array<{ finish_reason?: string | null; message?: { content?: string | null } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
 };
 
 export function validateQuestionCount(value: unknown): number {
@@ -89,6 +91,7 @@ export function validateQuestionCount(value: unknown): number {
   return count;
 }
 
+const MAX_GROQ_SYLLABUS_CONTEXT_CHARS = 12_000;
 const GROQ_MODEL = 'openai/gpt-oss-120b';
 
 const GROQ_QUESTION_JSON_SCHEMA = {
@@ -400,6 +403,14 @@ export class AiQuestionService {
     const generationSyllabusText = selectedUnits.length
       ? selectedUnits.map((unit) => unit!.text).join('\n\n')
       : syllabusText;
+    if (generationSyllabusText.length > MAX_GROQ_SYLLABUS_CONTEXT_CHARS) {
+      const err: any = new Error(
+        `The selected syllabus context is too large for a single Groq request (${generationSyllabusText.length} characters; maximum ${MAX_GROQ_SYLLABUS_CONTEXT_CHARS}). Select fewer units or a narrower syllabus section.`
+      );
+      err.statusCode = 413;
+      err.code = 'AI_SYLLABUS_CONTEXT_TOO_LARGE';
+      throw err;
+    }
     const availableUnitKeys = new Set(availableUnits.map((unit) => normalizeSyllabusUnit(unit.name)));
     const shouldGenerateAll = isAllTopics || (!topicOrUnit && requestedUnits.length === 0);
 
@@ -480,7 +491,7 @@ Rules:
         : topicOrUnit
           ? `Focus on topic/unit "${topicOrUnit}".`
           : '';
-      const prompt = `Generate ${count} rigorous university-level multiple-choice questions (MCQs) for the subject "${resolvedSubject}". ${scopeInstruction} ${unitScopeInstruction} Use exact metadata values subject="${resolvedSubject}", course="${safeCourse}", semester="${safeSemester}", and topic="${resolvedTopic}". ${difficultyInstruction} Each question must have exactly 4 distinct options with IDs "A", "B", "C", and "D", a single valid correctOption ("A", "B", "C", or "D"), difficulty ("EASY", "MEDIUM", or "HARD"), a syllabus unit and syllabus topic supported by the supplied content, a sourceReference copied exactly from the syllabus, marks (${marks}), and a concise academic explanation. If the syllabus is insufficient, return an empty array. Do not invent any value to fill a required field.${syllabusContext}`;
+      const prompt = `Generate exactly ${count} rigorous university-level multiple-choice questions (MCQs) for the subject "${resolvedSubject}". The questions array must contain exactly ${count} items, not fewer or more. ${scopeInstruction} ${unitScopeInstruction} Use exact metadata values subject="${resolvedSubject}", course="${safeCourse}", semester="${safeSemester}", and topic="${resolvedTopic}". ${difficultyInstruction} Each question must have exactly 4 distinct options with IDs "A", "B", "C", and "D", a single valid correctOption ("A", "B", "C", or "D"), difficulty ("EASY", "MEDIUM", or "HARD"), a syllabus unit and syllabus topic supported by the supplied content, a sourceReference copied exactly from the syllabus, marks (${marks}), and a concise academic explanation. If the syllabus is insufficient, return an empty array. Do not invent any value to fill a required field.${syllabusContext}`;
 
       const response = await callProviderWithTransientRetries<GenerationProviderResponse>(() => {
         return groqClient.chat.completions.create({
@@ -502,7 +513,8 @@ Rules:
         });
       }, retryHooks, modelName);
 
-      const rawText = response.choices?.[0]?.message?.content?.trim();
+      const choice = response.choices?.[0];
+      const rawText = choice?.message?.content?.trim();
       if (!rawText) {
         const err: any = new Error(`${provider} returned an empty response.`);
         err.statusCode = 502;
@@ -535,7 +547,10 @@ Rules:
         throw err;
       }
       if (parsed.length !== count) {
-        const err: any = new Error(`${provider} returned an unexpected number of questions.`);
+        logger.error(
+          `[AI Question Gen] ${provider} returned ${parsed.length} questions; ${count} requested (finish_reason: ${choice?.finish_reason || 'unknown'}, prompt_tokens: ${response.usage?.prompt_tokens ?? 'unknown'}, completion_tokens: ${response.usage?.completion_tokens ?? 'unknown'}, response_chars: ${rawText.length}).`
+        );
+        const err: any = new Error(`${provider} returned ${parsed.length} questions; exactly ${count} were requested.`);
         err.statusCode = 502;
         err.code = 'AI_INVALID_RESPONSE';
         throw err;
@@ -682,6 +697,7 @@ Rules:
       const error = err as Error & { status?: number; statusCode?: number; code?: string; cause?: { code?: string } };
       if (
         error.code === 'AI_INVALID_RESPONSE' ||
+        error.code === 'AI_SYLLABUS_CONTEXT_TOO_LARGE' ||
         error.code === 'INSUFFICIENT_SYLLABUS_CONTEXT' ||
         error.code === 'AI_INVALID_REQUEST' ||
         error.code === 'AI_GENERATION_NOT_CONFIGURED' ||
@@ -701,11 +717,15 @@ Rules:
           ? 503
           : 502;
       logger.error(`${provider} provider request failed (${error.name || 'Error'}, status ${statusCode}).`);
-      const wrapped: any = new Error(`${provider} provider request failed with HTTP ${statusCode}.`);
+      const wrapped: any = new Error(statusCode === 413
+        ? 'Groq rejected the generation request as too large. Select fewer syllabus units or a narrower syllabus section.'
+        : `${provider} provider request failed with HTTP ${statusCode}.`);
       wrapped.statusCode = statusCode;
-      wrapped.code = retryable
-        ? 'AI_GENERATION_TEMPORARILY_UNAVAILABLE'
-        : 'AI_PROVIDER_REQUEST_FAILED';
+      wrapped.code = statusCode === 413
+        ? 'AI_SYLLABUS_CONTEXT_TOO_LARGE'
+        : retryable
+          ? 'AI_GENERATION_TEMPORARILY_UNAVAILABLE'
+          : 'AI_PROVIDER_REQUEST_FAILED';
       throw wrapped;
     }
   }

@@ -21,20 +21,37 @@ export const ScoreHistoryChart: React.FC<{ data: StudentResult[] }> = ({ data })
     );
   }
 
-  const chartData = data.map((d) => ({
-    date: d.date,
-    score: d.percentage ?? d.accuracy ?? 0,
-    exam: d.examTitle || d.subject || 'Exam'
-  }));
+  const chartData = data
+    .filter(d => typeof d.percentage === 'number' && Number.isFinite(d.percentage))
+    .slice()
+    .sort((first, second) => new Date(first.date).getTime() - new Date(second.date).getTime())
+    .map((result, index) => ({
+      label: `Exam ${index + 1}`,
+      score: Math.max(0, Math.min(100, result.percentage!)),
+      exam: result.examTitle || result.subject || 'Exam',
+      date: result.date
+    }));
+
+  if (chartData.length === 0) {
+    return (
+      <div className="h-56 w-full flex items-center justify-center text-[15px] text-slate-500 dark:text-slate-400 border border-dashed border-slate-200 dark:border-slate-700 rounded-lg">
+        No data available.
+      </div>
+    );
+  }
 
   return (
     <div className="h-64 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-          <XAxis dataKey="date" stroke="#64748b" fontSize={13} />
+          <XAxis dataKey="label" stroke="#64748b" fontSize={13} />
           <YAxis stroke="#64748b" fontSize={13} domain={[0, 100]} />
           <Tooltip
+            labelFormatter={(_label, payload) => {
+              const point = payload?.[0]?.payload as { exam?: string; date?: string } | undefined;
+              return point ? `${point.exam || 'Exam'} · ${point.date || ''}` : '';
+            }}
             contentStyle={{
               backgroundColor: '#1e293b',
               border: 'none',

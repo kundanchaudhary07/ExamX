@@ -314,6 +314,15 @@ export function mapBackendExamToFrontend(e: any): ScheduledExam {
     assignedStudentsCount: e.assignedStudentsCount ?? assignedStudentIds.length,
     attemptStatus,
     studentAttemptStatus: attemptStatus,
+    studentAttemptId: e.studentAttemptId,
+    studentAttempts: Array.isArray(e.studentAttempts)
+      ? e.studentAttempts.map((attempt: any) => ({
+          attemptId: attempt.attemptId,
+          status: attempt.status,
+          resultPublished: Boolean(attempt.resultPublished)
+        }))
+      : undefined,
+    canAttempt: typeof e.canAttempt === 'boolean' ? e.canAttempt : undefined,
     resultPublished:
       Boolean(e.publishedResult) || e.status === 'PUBLISHED' || e.status === 'RESULT_PUBLISHED',
     attemptCount: e.attemptCount ?? e.attemptsUsed ?? 0,
@@ -691,11 +700,25 @@ export const dbService = {
         examsTakenCount: data.kpis?.examsTakenCount ?? results.length,
         averagePercentage: data.kpis?.averagePercentage ?? avgPct,
         publishedResultsCount: data.kpis?.publishedResultsCount ?? results.length,
-        queriesCount: data.kpis?.queriesCount ?? queries.length
+        queriesCount: data.kpis?.queriesCount ?? queries.length,
+        examsAttempted: data.kpis?.examsAttempted ?? data.kpis?.completedExams ?? 0,
+        examsNotAttempted: data.kpis?.examsNotAttempted ?? data.kpis?.pendingExams ?? 0,
+        examsPassed: data.kpis?.examsPassed ?? 0,
+        examsFailed: data.kpis?.examsFailed ?? 0,
+        averageScore: data.kpis?.averageScore ?? null,
+        highestScore: data.kpis?.highestScore ?? null,
+        lowestScore: data.kpis?.lowestScore ?? null,
+        passRate: data.kpis?.passRate ?? null,
+        overallRank: data.kpis?.overallRank ?? null,
+        totalRankedStudents: data.kpis?.totalRankedStudents ?? 0
       },
       recentExams,
       results,
-      queries
+      queries,
+      examHistory: data.examHistory || [],
+      performance: data.performance || { subjectBreakdown: [], overallRank: null },
+      proctoringSummary: data.proctoringSummary,
+      assistance: data.assistance
     };
   },
 
@@ -1093,6 +1116,14 @@ export const dbService = {
     return mapBackendExamToFrontend(data.exam);
   },
 
+  async deleteExam(examId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/exams/${encodeURIComponent(examId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders()
+    });
+    await handleApiResponse(res);
+  },
+
   async updateExamStatus(
     examId: string,
     status:
@@ -1362,6 +1393,52 @@ export const dbService = {
     });
     const data = await handleApiResponse<{ results: any[] }>(res);
     return (data.results || []).map(mapBackendResultToFrontend);
+  },
+
+  async getMyRankings(examId?: string): Promise<{
+    examRank: {
+      rank: number;
+      totalRankedStudents: number;
+      percentile: number;
+      score: number;
+      totalMarks: number;
+    } | null;
+    overallRank: {
+      rank: number;
+      totalRankedStudents: number;
+      percentile: number;
+      averagePercentage: number;
+      examsAttempted: number;
+      passed: number;
+    } | null;
+  }> {
+    const params = new URLSearchParams();
+    if (examId) params.set('examId', examId);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${API_BASE}/results/my-rankings${qs}`, {
+      method: 'GET',
+      headers: getAuthHeaders()
+    });
+    const data = await handleApiResponse<{
+      rankings: {
+        examRank: {
+          rank: number;
+          totalRankedStudents: number;
+          percentile: number;
+          score: number;
+          totalMarks: number;
+        } | null;
+        overallRank: {
+          rank: number;
+          totalRankedStudents: number;
+          percentile: number;
+          averagePercentage: number;
+          examsAttempted: number;
+          passed: number;
+        } | null;
+      };
+    }>(res);
+    return data.rankings;
   },
 
   async getResultById(resultId: string): Promise<StudentResult> {

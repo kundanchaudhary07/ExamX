@@ -4,13 +4,19 @@ import { User } from '../models/User';
 import { ExamAssignment } from '../models/ExamAssignment';
 import { ExamAttempt } from '../models/ExamAttempt';
 import { Result } from '../models/Result';
+import { StudentQuery } from '../models/StudentQuery';
+import { ProctoringEvent } from '../models/ProctoringEvent';
+import { UnblockRequest } from '../models/UnblockRequest';
+import { Conversation } from '../models/Conversation';
+import { ChatMessage } from '../models/ChatMessage';
 import { IExamInput, SafeStudentExamDto, ExamStatus } from '../types/exam.types';
 import { JwtUserPayload } from '../types/auth.types';
 import { generateNextExamId } from '../utils/exam-id.generator';
 import { AuditService } from './audit.service';
-import { emitExamEvent, emitNotification } from '../realtime/socket';
+import { emitExamEvent, emitNotification, leaveExamRoom } from '../realtime/socket';
 import { logger } from '../utils/logger';
 import { SubjectService } from './subject.service';
+import { AttemptService } from './attempt.service';
 
 export const CANONICAL_COURSES = [
   'B.Tech CSE',
@@ -580,7 +586,7 @@ export class ExamService {
     filters: { subject?: string; status?: string; search?: string },
     user: JwtUserPayload
   ): Promise<IExamDocument[]> {
-    const query: any = {};
+    const query: any = { deleting: { $ne: true } };
 
     // Teacher can ONLY view exams created by themselves
     if (user.role === 'TEACHER') {
@@ -604,7 +610,7 @@ export class ExamService {
    * Get single exam by examId with ownership verification
    */
   static async getExamById(examId: string, user: JwtUserPayload): Promise<IExamDocument> {
-    const exam = await Exam.findOne({ examId });
+    const exam = await Exam.findOne({ examId, deleting: { $ne: true } });
     if (!exam) {
       const err: any = new Error(`Exam with ID ${examId} not found`);
       err.statusCode = 404;
@@ -830,6 +836,10 @@ export class ExamService {
     await exam.save();
     const examJson = exam.toJSON();
 
+    if (exam.status === 'ENDED' || exam.status === 'CLOSED') {
+      await AttemptService.forceEndExam(exam, user.userId);
+    }
+
     if (updates.status && updates.status !== previousStatus) {
       if (updates.status === 'SCHEDULED') {
         await AuditService.record({
@@ -953,6 +963,12 @@ export class ExamService {
    * Delete exam and clean up assignments with ownership verification
    */
   static async deleteExam(examId: string, user: JwtUserPayload): Promise<void> {
+    if (user.role !== 'ADMIN') {
+      const err: any = new Error('Forbidden: Only administrators can delete examinations');
+      err.statusCode = 403;
+      throw err;
+    }
+
     const exam = await Exam.findOne({ examId });
     if (!exam) {
       const err: any = new Error(`Exam with ID ${examId} not found`);
@@ -960,16 +976,67 @@ export class ExamService {
       throw err;
     }
 
-    if (user.role === 'TEACHER' && exam.createdBy !== user.userId) {
-      const err: any = new Error('Forbidden: You are not authorized to delete this exam');
-      err.statusCode = 403;
+    const deletingExam = await Exam.findOneAndUpdate(
+      { examId, deleting: { $ne: true } },
+      { $set: { deleting: true, status: 'CLOSED' } },
+      { returnDocument: 'after' }
+    );
+    const examBeingDeleted = deletingExam || await Exam.findOne({ examId, deleting: true });
+    if (!examBeingDeleted) {
+      const err: any = new Error(`Exam with ID ${examId} not found`);
+      err.statusCode = 404;
       throw err;
     }
 
-    await Exam.deleteOne({ examId });
-    await ExamAssignment.deleteMany({ examId });
-    emitExamEvent(exam, 'exam.cancelled', { examId }, true, user.userId);
-    logger.info(`Exam ${examId} and its assignments deleted by ${user.role} [${user.userId}]`);
+    await AttemptService.forceEndExam(examBeingDeleted, user.userId);
+
+    const deleteOwnedRecords = async (): Promise<void> => {
+      const conversations = await Conversation.find({ examId, type: 'EXAM_LIVE' })
+        .select('conversationId')
+        .lean();
+      const conversationIds = conversations.map(conversation => conversation.conversationId);
+      await Promise.all([
+        ExamAssignment.deleteMany({ examId }),
+        ExamAttempt.deleteMany({ examId }),
+        Result.deleteMany({ examId }),
+        ProctoringEvent.deleteMany({ examId }),
+        StudentQuery.deleteMany({ examId }),
+        UnblockRequest.deleteMany({ examId }),
+        ChatMessage.deleteMany({ examId }),
+        ...(conversationIds.length
+          ? [ChatMessage.deleteMany({ conversationId: { $in: conversationIds } })]
+          : []),
+        Conversation.deleteMany({ examId, type: 'EXAM_LIVE' })
+      ]);
+    };
+
+    await deleteOwnedRecords();
+    const deleted = await Exam.deleteOne({ examId, deleting: true });
+    if (deleted.deletedCount !== 1) {
+      const err: any = new Error(`Exam ${examId} could not be deleted because it changed concurrently`);
+      err.statusCode = 409;
+      throw err;
+    }
+    await deleteOwnedRecords();
+
+    const audit = await AuditService.record({
+      actorId: user.userId,
+      actorName: user.name,
+      actorRole: user.role,
+      action: 'EXAM_DELETED',
+      targetType: 'EXAM',
+      targetId: examId,
+      details: `Deleted examination "${exam.title}" (${examId}) and all exam-owned records`
+    });
+    if (!audit) {
+      const err: any = new Error(`Exam ${examId} was deleted, but its deletion audit record could not be saved`);
+      err.statusCode = 500;
+      throw err;
+    }
+
+    emitExamEvent(examBeingDeleted, 'exam.deleted', { examId }, true, user.userId);
+    leaveExamRoom(examId);
+    logger.info(`Exam ${examId} and its owned records deleted by ADMIN [${user.userId}]`);
   }
 
   /**
@@ -1415,7 +1482,8 @@ export class ExamService {
         { assignedStudents: studentUserId },
         { assignedStudentIds: studentUserId }
       ],
-      status: { $in: ['PUBLISHED', 'LIVE', 'SCHEDULED', 'ENDED'] }
+      status: { $in: ['PUBLISHED', 'LIVE', 'SCHEDULED', 'ENDED', 'CLOSED', 'RESULT_PUBLISHED'] },
+      deleting: { $ne: true }
     })
       .sort({ startAt: 1, startDateTime: 1, createdAt: -1 })
       .lean();
@@ -1431,15 +1499,19 @@ export class ExamService {
     const attemptsCountMap = new Map<string, number>();
     const latestAttemptMap = new Map<string, any>();
     const activeAttemptMap = new Map<string, any>();
+    const attemptsByExamMap = new Map<string, any[]>();
 
     for (const att of allAttempts) {
+      const examAttempts = attemptsByExamMap.get(att.examId) || [];
+      examAttempts.push(att);
+      attemptsByExamMap.set(att.examId, examAttempts);
       if (!latestAttemptMap.has(att.examId)) {
         latestAttemptMap.set(att.examId, att);
       }
       if (att.status === 'IN_PROGRESS' && !activeAttemptMap.has(att.examId)) {
         activeAttemptMap.set(att.examId, att);
       }
-      if (['SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED'].includes(att.status)) {
+      if (['SUBMITTED', 'AUTO_SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED', 'FORCE_SUBMITTED'].includes(att.status)) {
         attemptsCountMap.set(att.examId, (attemptsCountMap.get(att.examId) || 0) + 1);
       }
     }
@@ -1449,12 +1521,12 @@ export class ExamService {
       studentId: studentUserId,
       status: { $in: ['PUBLISHED', 'QUERIED', 'REVISED'] }
     })
-      .select('examId resultId score percentage')
+      .select('examId attemptId resultId score percentage')
       .lean();
 
     const publishedResultMap = new Map<string, any>();
     for (const res of publishedResults) {
-      publishedResultMap.set(res.examId, res);
+      publishedResultMap.set(res.attemptId, res);
     }
 
     const assignmentMap = new Map<string, Date>();
@@ -1468,7 +1540,10 @@ export class ExamService {
       const limit = e.attemptLimit || 1;
       const latestAttempt = latestAttemptMap.get(e.examId);
       const activeAttempt = activeAttemptMap.get(e.examId);
-      const publishedRes = publishedResultMap.get(e.examId);
+      const examAttempts = attemptsByExamMap.get(e.examId) || [];
+      const publishedRes = latestAttempt
+        ? publishedResultMap.get(latestAttempt.attemptId)
+        : undefined;
 
       // Determine authoritative student attempt status
       const studentAttemptStatus = latestAttempt
@@ -1479,9 +1554,11 @@ export class ExamService {
 
       const isConcluded =
         studentAttemptStatus === 'SUBMITTED' ||
+        studentAttemptStatus === 'AUTO_SUBMITTED' ||
         studentAttemptStatus === 'EVALUATED' ||
         studentAttemptStatus === 'TERMINATED' ||
         studentAttemptStatus === 'EXPIRED' ||
+        studentAttemptStatus === 'FORCE_SUBMITTED' ||
         used >= limit;
 
       const canAttempt =
@@ -1515,6 +1592,12 @@ export class ExamService {
         canAttempt,
         studentAttemptStatus,
         attemptStatus: studentAttemptStatus,
+        studentAttemptId: latestAttempt?.attemptId,
+        studentAttempts: examAttempts.map(attempt => ({
+          attemptId: attempt.attemptId,
+          status: attempt.status,
+          resultPublished: publishedResultMap.has(attempt.attemptId)
+        })),
         activeAttemptId: activeAttempt ? activeAttempt.attemptId : null,
         resultPublished: Boolean(publishedRes)
       };

@@ -208,7 +208,7 @@ router.get(
         }),
         ExamAttempt.countDocuments({
           studentId: user.userId,
-          status: { $in: ['SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED'] }
+          status: { $in: ['SUBMITTED', 'AUTO_SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED', 'FORCE_SUBMITTED'] }
         }),
         Result.countDocuments({
           studentId: user.userId,

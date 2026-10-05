@@ -1,12 +1,22 @@
 import assert from 'assert';
 import http from 'http';
+import { io as createSocketClient, Socket } from 'socket.io-client';
 import { createApp } from '../src/app';
+import { initSocketServer, RealtimeEventPayload } from '../src/realtime/socket';
 import { connectDatabase, disconnectDatabase } from '../src/config/database';
 import { seedAdmin } from '../scripts/seed-admin';
 import { User } from '../src/models/User';
 import { Question } from '../src/models/Question';
 import { Exam } from '../src/models/Exam';
 import { ExamAssignment } from '../src/models/ExamAssignment';
+import { ExamAttempt } from '../src/models/ExamAttempt';
+import { Result } from '../src/models/Result';
+import { ProctoringEvent } from '../src/models/ProctoringEvent';
+import { StudentQuery } from '../src/models/StudentQuery';
+import { UnblockRequest } from '../src/models/UnblockRequest';
+import { Conversation } from '../src/models/Conversation';
+import { ChatMessage } from '../src/models/ChatMessage';
+import { AuditLog } from '../src/models/AuditLog';
 import { ENV } from '../src/config/env';
 
 async function runPhase15Tests() {
@@ -17,9 +27,11 @@ async function runPhase15Tests() {
 
   const app = createApp();
   const server = http.createServer(app);
+  const socketServer = initSocketServer(server);
   await new Promise<void>(resolve => server.listen(0, resolve));
   const address = server.address() as any;
   const baseUrl = `http://127.0.0.1:${address.port}`;
+  let studentSocket: Socket | null = null;
 
   async function apiRequest(method: string, path: string, body?: any, token?: string) {
     const headers: Record<string, string> = {
@@ -517,6 +529,341 @@ async function runPhase15Tests() {
     assert.strictEqual(publishedExamResult.totalMarks, 10);
     console.log('✓ 4. RBAC, lifecycle transitions, student attempt, and result publication passed');
 
+    const createLiveSharedExam = async (title: string): Promise<string> => {
+      const response = await apiRequest(
+        'POST',
+        '/api/exams',
+        {
+          title,
+          subject: 'Operating Systems',
+          course: 'B.Tech CSE',
+          semester: 'Semester 4',
+          durationMinutes: 45,
+          totalMarks: 10,
+          passingMarks: 5,
+          attemptLimit: 2,
+          questionIds: [q1Id, q3Id],
+          assignedStudentIds: [student1Id, student2Id],
+          startTime: validStartIso,
+          endTime: validEndIso
+        },
+        adminToken
+      );
+      assert.strictEqual(response.status, 201, 'Admin should create an exam assigned to both students');
+      const sharedExamId = response.body.data.exam.examId;
+      for (const status of ['SCHEDULED', 'LIVE']) {
+        const statusResponse = await apiRequest(
+          'PATCH',
+          `/api/exams/${sharedExamId}/status`,
+          { status },
+          adminToken
+        );
+        assert.strictEqual(statusResponse.status, 200, `Admin should transition exam to ${status}`);
+      }
+      return sharedExamId;
+    };
+
+    const forceEndExamId = await createLiveSharedExam('Force-end reliability test');
+    const followUpExamId = await createLiveSharedExam('Post-force-end availability test');
+    const unattemptedStudentExams = await apiRequest(
+      'GET',
+      '/api/student/exams',
+      undefined,
+      student1Token
+    );
+    assert.strictEqual(unattemptedStudentExams.status, 200);
+    assert.ok(
+      unattemptedStudentExams.body.data.exams.some(
+        (exam: any) => exam.examId === followUpExamId && !exam.studentAttemptId
+      ),
+      'Assigned exams must be returned even before the student attempts them'
+    );
+    const firstActiveAttempt = await apiRequest(
+      'POST',
+      `/api/student/exams/${forceEndExamId}/start`,
+      {},
+      student1Token
+    );
+    const secondActiveAttempt = await apiRequest(
+      'POST',
+      `/api/student/exams/${forceEndExamId}/start`,
+      {},
+      student2Token
+    );
+    assert.strictEqual(firstActiveAttempt.status, 201);
+    assert.strictEqual(secondActiveAttempt.status, 201);
+    const firstForceAttemptId = firstActiveAttempt.body.data.attempt.attemptId;
+    const secondForceAttemptId = secondActiveAttempt.body.data.attempt.attemptId;
+    const inProgressStudentExams = await apiRequest(
+      'GET',
+      '/api/student/exams',
+      undefined,
+      student1Token
+    );
+    const inProgressExamDto = inProgressStudentExams.body.data.exams.find(
+      (exam: any) => exam.examId === forceEndExamId
+    );
+    assert.strictEqual(inProgressExamDto.studentAttemptStatus, 'IN_PROGRESS');
+    assert.ok(
+      inProgressExamDto.studentAttempts.some(
+        (attempt: any) => attempt.attemptId === firstForceAttemptId && attempt.status === 'IN_PROGRESS'
+      ),
+      'Student exam data must include exact in-progress attempt metadata'
+    );
+    for (const [attemptId, studentToken] of [
+      [firstForceAttemptId, student1Token],
+      [secondForceAttemptId, student2Token]
+    ]) {
+      const saveResponse = await apiRequest(
+        'PATCH',
+        `/api/attempts/${attemptId}/answers`,
+        {
+          answers: [
+            { questionId: q1Id, selectedOption: 'B' },
+            { questionId: q3Id, selectedOption: 'A' }
+          ]
+        },
+        studentToken
+      );
+      assert.strictEqual(saveResponse.status, 200, 'Active attempt answers should save before force-end');
+    }
+
+    studentSocket = createSocketClient(baseUrl, {
+      path: '/socket.io',
+      auth: { token: student1Token },
+      transports: ['websocket'],
+      reconnection: false
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Student socket connection timed out')), 5000);
+      studentSocket!.once('connect', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+      studentSocket!.once('connect_error', error => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+    const forceEndEvent = new Promise<RealtimeEventPayload>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Student force-end event timed out')), 5000);
+      studentSocket!.on('realtime:event', (event: RealtimeEventPayload) => {
+        if (event.event !== 'exam.forceEnded' || event.data?.attemptId !== firstForceAttemptId) return;
+        clearTimeout(timeout);
+        resolve(event);
+      });
+    });
+
+    for (let requestNumber = 0; requestNumber < 2; requestNumber += 1) {
+      const forceEndResponse = await apiRequest(
+        'PATCH',
+        `/api/exams/${forceEndExamId}/status`,
+        { status: 'ENDED' },
+        adminToken
+      );
+      assert.strictEqual(
+        forceEndResponse.status,
+        200,
+        `Force-end request ${requestNumber + 1} should be idempotent: ${JSON.stringify(forceEndResponse.body)}`
+      );
+    }
+    const forceEvent = await forceEndEvent;
+    assert.strictEqual(forceEvent.data.message, 'Exam ended by faculty/admin. Your attempt was submitted automatically.');
+    const forcedAttempts = await ExamAttempt.find({
+      attemptId: { $in: [firstForceAttemptId, secondForceAttemptId] }
+    }).lean();
+    assert.strictEqual(forcedAttempts.length, 2);
+    assert.ok(forcedAttempts.every(attempt => attempt.status === 'FORCE_SUBMITTED'));
+    const forceEndedStudentExams = await apiRequest(
+      'GET',
+      '/api/student/exams',
+      undefined,
+      student1Token
+    );
+    const forceEndedExamDto = forceEndedStudentExams.body.data.exams.find(
+      (exam: any) => exam.examId === forceEndExamId
+    );
+    assert.strictEqual(forceEndedExamDto.studentAttemptStatus, 'FORCE_SUBMITTED');
+    assert.ok(
+      forceEndedExamDto.studentAttempts.some(
+        (attempt: any) =>
+          attempt.attemptId === firstForceAttemptId &&
+          attempt.status === 'FORCE_SUBMITTED' &&
+          attempt.resultPublished === false
+      ),
+      'Force-ended attempt status and unpublished result visibility must be returned without exposing a score'
+    );
+    assert.strictEqual(await Result.countDocuments({ examId: forceEndExamId }), 2);
+    assert.ok(
+      (await Result.find({ examId: forceEndExamId }).lean()).every(result => result.score === 10),
+      'Force-end should persist evaluated scores from each active attempt'
+    );
+    assert.strictEqual(
+      (await apiRequest(
+        'PATCH',
+        `/api/attempts/${firstForceAttemptId}/answers`,
+        { answers: [{ questionId: q1Id, selectedOption: 'A' }] },
+        student1Token
+      )).status,
+      400,
+      'Late answers must not mutate a force-submitted attempt'
+    );
+    assert.strictEqual(
+      (await apiRequest(
+        'POST',
+        `/api/attempts/${firstForceAttemptId}/heartbeat`,
+        {},
+        student1Token
+      )).status,
+      400,
+      'Late heartbeats must not reactivate a force-submitted attempt'
+    );
+    assert.strictEqual(
+      (await apiRequest(
+        'POST',
+        '/api/proctoring/events',
+        {
+          examId: forceEndExamId,
+          attemptId: firstForceAttemptId,
+          eventType: 'TAB_SWITCH'
+        },
+        student1Token
+      )).status,
+      400,
+      'Late proctoring requests must not mutate a force-submitted attempt'
+    );
+
+    for (const [studentToken, studentId] of [
+      [student1Token, student1Id],
+      [student2Token, student2Id]
+    ]) {
+      const nextAttempt = await apiRequest(
+        'POST',
+        `/api/student/exams/${followUpExamId}/start`,
+        {},
+        studentToken
+      );
+      assert.strictEqual(nextAttempt.status, 201, `Student ${studentId} should start another exam immediately`);
+    }
+    const expiringAttempt = await ExamAttempt.findOne({
+      examId: followUpExamId,
+      studentId: student1Id,
+      status: 'IN_PROGRESS'
+    });
+    assert.ok(expiringAttempt);
+    await ExamAttempt.updateOne(
+      { attemptId: expiringAttempt!.attemptId },
+      { $set: { expiresAt: new Date(Date.now() - 1000) } }
+    );
+    const expiredHeartbeat = await apiRequest(
+      'POST',
+      `/api/attempts/${expiringAttempt!.attemptId}/heartbeat`,
+      {},
+      student1Token
+    );
+    assert.strictEqual(expiredHeartbeat.status, 200, 'An expired timer should auto-submit server-side');
+    assert.strictEqual(expiredHeartbeat.body.data.attempt.status, 'EXPIRED');
+    assert.ok(await Result.exists({ attemptId: expiringAttempt!.attemptId }));
+
+    const questionCountBeforeDelete = await Question.countDocuments({
+      questionId: { $in: [q1Id, q2Id, q3Id] }
+    });
+    const deleteConversationId = `CV-DELETE-${Date.now()}`;
+    const deleteMessageId = `MSG-DELETE-${Date.now()}`;
+    await Promise.all([
+      ProctoringEvent.create({
+        eventId: `PE-DELETE-${Date.now()}`,
+        attemptId: firstForceAttemptId,
+        examId: forceEndExamId,
+        studentId: student1Id,
+        eventType: 'TAB_SWITCH',
+        details: 'Deletion fixture'
+      }),
+      StudentQuery.create({
+        queryId: `SQ-DELETE-${Date.now()}`,
+        examId: forceEndExamId,
+        examTitle: 'Force-end reliability test',
+        attemptId: firstForceAttemptId,
+        questionText: 'Deletion fixture',
+        studentId: student1Id,
+        assignedFacultyId: teacherAId,
+        reason: 'OTHER',
+        explanation: 'Deletion fixture'
+      }),
+      UnblockRequest.create({
+        requestId: `UB-DELETE-${Date.now()}`,
+        attemptId: firstForceAttemptId,
+        examId: forceEndExamId,
+        studentId: student1Id,
+        assignedFacultyId: teacherAId,
+        reason: 'Deletion fixture'
+      }),
+      Conversation.create({
+        conversationId: deleteConversationId,
+        type: 'EXAM_LIVE',
+        examId: forceEndExamId,
+        participants: [student1Id, teacherAId]
+      }),
+      ChatMessage.create({
+        messageId: deleteMessageId,
+        conversationId: deleteConversationId,
+        senderId: student1Id,
+        senderRole: 'STUDENT',
+        senderName: 'AaravPatel',
+        content: 'Deletion fixture',
+        type: 'EXAM_LIVE',
+        examId: forceEndExamId
+      })
+    ]);
+
+    const nonAdminDelete = await apiRequest(
+      'DELETE',
+      `/api/exams/${forceEndExamId}`,
+      undefined,
+      teacherAToken
+    );
+    assert.strictEqual(nonAdminDelete.status, 403, 'Non-admin deletion must be rejected server-side');
+    const deleteExamResponse = await apiRequest(
+      'DELETE',
+      `/api/exams/${forceEndExamId}`,
+      undefined,
+      adminToken
+    );
+    assert.strictEqual(deleteExamResponse.status, 200, 'Admin deletion should succeed');
+    assert.strictEqual(await Exam.exists({ examId: forceEndExamId }), null);
+    assert.strictEqual(await ExamAttempt.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(await Result.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(await ProctoringEvent.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(await StudentQuery.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(await UnblockRequest.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(await Conversation.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(await ChatMessage.countDocuments({ examId: forceEndExamId }), 0);
+    assert.strictEqual(
+      await Question.countDocuments({ questionId: { $in: [q1Id, q2Id, q3Id] } }),
+      questionCountBeforeDelete,
+      'Deleting an exam must preserve its Question Bank questions'
+    );
+    assert.ok(await AuditLog.exists({ action: 'EXAM_DELETED', targetId: forceEndExamId }));
+    assert.strictEqual(
+      (await apiRequest('GET', `/api/exams/${forceEndExamId}`, undefined, adminToken)).status,
+      404,
+      'Deleted exam must no longer be accessible through its former URL'
+    );
+    assert.strictEqual(
+      (await apiRequest(
+        'POST',
+        `/api/student/exams/${forceEndExamId}/start`,
+        {},
+        student1Token
+      )).status,
+      404,
+      'Deleted exam must no longer accept student attempts'
+    );
+    await Exam.deleteOne({ examId: followUpExamId });
+    await ExamAssignment.deleteMany({ examId: followUpExamId });
+    await ExamAttempt.deleteMany({ examId: followUpExamId });
+    console.log('✓ 5. Multi-student force-end idempotency, stale-lock release, admin deletion, and Question Bank preservation passed');
+
     // Clean up test artifacts
     await Exam.deleteMany({ examId });
     await ExamAssignment.deleteMany({ examId });
@@ -525,7 +872,8 @@ async function runPhase15Tests() {
 
     console.log('--- ALL PHASE 1.5 STRICT EXAM LIFECYCLE TESTS PASSED! ---');
   } finally {
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    studentSocket?.disconnect();
+    await new Promise<void>(resolve => socketServer.close(() => resolve()));
     await disconnectDatabase();
   }
 }

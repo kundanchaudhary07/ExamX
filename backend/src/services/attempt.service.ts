@@ -8,7 +8,7 @@ import { User } from '../models/User';
 import { JwtUserPayload } from '../types/auth.types';
 import { generateNextAttemptId, generateNextResultId } from '../utils/exam-id.generator';
 import { AuditService } from './audit.service';
-import { emitTeacherAndAdmin } from '../realtime/socket';
+import { emitTeacherAndAdmin, emitToRooms } from '../realtime/socket';
 import { logger } from '../utils/logger';
 
 export interface SanitizedExamQuestionDto {
@@ -93,7 +93,13 @@ export class AttemptService {
     attempt: IExamAttemptDocument,
     exam: IExamDocument,
     rawAnswers: Array<{ questionId: string; selectedOption: string; markedForReview?: boolean }>,
-    finalAttemptStatus: 'SUBMITTED' | 'EXPIRED' | 'TERMINATED' | 'EVALUATED'
+    finalAttemptStatus:
+      | 'SUBMITTED'
+      | 'AUTO_SUBMITTED'
+      | 'EXPIRED'
+      | 'TERMINATED'
+      | 'EVALUATED'
+      | 'FORCE_SUBMITTED'
   ): Promise<{ attempt: IExamAttemptDocument; result: IResultDocument }> {
     const [questions, resolutions] = await Promise.all([
       Question.find({ questionId: { $in: exam.questions } }),
@@ -186,37 +192,69 @@ export class AttemptService {
     }
 
     rawScore += graceMarks;
-    const effectiveTotalMarks = questionMarksTotal;
-    const finalScore =
+    let effectiveTotalMarks = questionMarksTotal;
+    let effectiveFinalStatus = finalAttemptStatus;
+    let finalScore =
       finalAttemptStatus === 'TERMINATED'
         ? 0
         : Math.min(effectiveTotalMarks, Math.max(0, Number(rawScore.toFixed(2))));
-    const percentage =
+    let percentage =
       effectiveTotalMarks > 0 ? Number(((finalScore / effectiveTotalMarks) * 100).toFixed(2)) : 0;
 
+    let submittedAt = new Date();
+    let finalizedAttempt = await ExamAttempt.findOneAndUpdate(
+      {
+        attemptId: attempt.attemptId,
+        status: 'IN_PROGRESS',
+        updatedAt: attempt.updatedAt
+      },
+      {
+        $set: {
+          answers: attemptAnswers,
+          score: finalScore,
+          totalMarks: effectiveTotalMarks,
+          percentage,
+          status: finalAttemptStatus,
+          ...(finalAttemptStatus === 'TERMINATED' && { proctoringStatus: 'TERMINATED' }),
+          submittedAt
+        }
+      },
+      { returnDocument: 'after' }
+    );
+    if (!finalizedAttempt) {
+      const [currentAttempt, existingResult] = await Promise.all([
+        ExamAttempt.findOne({ attemptId: attempt.attemptId }),
+        Result.findOne({ attemptId: attempt.attemptId })
+      ]);
+      if (currentAttempt && existingResult) {
+        return { attempt: currentAttempt, result: existingResult };
+      }
+      if (currentAttempt && currentAttempt.status !== 'IN_PROGRESS') {
+        finalizedAttempt = currentAttempt;
+        effectiveFinalStatus = currentAttempt.status;
+        effectiveTotalMarks = currentAttempt.totalMarks;
+        finalScore = currentAttempt.score;
+        percentage = currentAttempt.percentage;
+        submittedAt = currentAttempt.submittedAt || submittedAt;
+      } else {
+        const err: any = new Error('Attempt was finalized by another request.');
+        err.statusCode = 409;
+        throw err;
+      }
+    }
     const passingThreshold =
       exam.passingMarks <= effectiveTotalMarks
         ? exam.passingMarks
         : Math.round(effectiveTotalMarks * 0.4);
 
-    attempt.answers = attemptAnswers;
-    attempt.score = finalScore;
-    attempt.totalMarks = effectiveTotalMarks;
-    attempt.percentage = percentage;
-    attempt.status = finalAttemptStatus;
-    attempt.submittedAt = new Date();
-    await attempt.save();
-
     await ExamAssignment.findOneAndUpdate(
       { examId: exam.examId, studentId: attempt.studentId },
-      { status: finalAttemptStatus === 'EXPIRED' ? 'EXPIRED' : 'SUBMITTED' }
+      { status: effectiveFinalStatus === 'EXPIRED' ? 'EXPIRED' : 'SUBMITTED' }
     );
 
     let result = await Result.findOne({ attemptId: attempt.attemptId });
     if (!result) {
-      const resultId = await generateNextResultId();
-      result = await Result.create({
-        resultId,
+      const resultData = {
         studentId: attempt.studentId,
         studentName: attempt.studentName,
         examId: exam.examId,
@@ -227,36 +265,136 @@ export class AttemptService {
         totalMarks: effectiveTotalMarks,
         passingMarks: passingThreshold,
         percentage,
-        passed: finalScore >= passingThreshold && finalAttemptStatus !== 'TERMINATED',
-        status: finalAttemptStatus === 'TERMINATED' ? 'TERMINATED' : 'PENDING',
+        passed: finalScore >= passingThreshold && effectiveFinalStatus !== 'TERMINATED',
+        status: effectiveFinalStatus === 'TERMINATED' ? 'TERMINATED' as const : 'PENDING' as const,
         answers: resultBreakdown,
         proctoringWarnings: attempt.warningCount || 0,
         feedback:
-          finalAttemptStatus === 'EXPIRED'
+          effectiveFinalStatus === 'EXPIRED'
             ? 'Attempt automatically finalized upon timer expiration.'
-            : finalAttemptStatus === 'TERMINATED'
+            : effectiveFinalStatus === 'TERMINATED'
             ? 'Attempt terminated due to proctoring violations.'
+            : effectiveFinalStatus === 'FORCE_SUBMITTED' || effectiveFinalStatus === 'AUTO_SUBMITTED'
+            ? 'Attempt automatically submitted when the examination was ended.'
             : 'Submitted for faculty verification.',
-        submittedAt: attempt.submittedAt
-      });
+        submittedAt
+      };
+      let resultCreated = false;
+      for (let retry = 0; retry < 5 && !result; retry += 1) {
+        try {
+          result = await Result.create({
+            resultId: await generateNextResultId(),
+            ...resultData
+          });
+          resultCreated = true;
+        } catch (error: any) {
+          if (error?.code !== 11000) throw error;
+          result = await Result.findOne({ attemptId: attempt.attemptId });
+          if (!result && retry === 4) throw error;
+        }
+      }
 
-      emitTeacherAndAdmin(exam.createdBy, 'result.created', { result: result.toJSON() }, attempt.studentId);
-      emitTeacherAndAdmin(
-        exam.createdBy,
-        'proctoring.completed',
-        {
-          attemptId: attempt.attemptId,
-          examId: exam.examId,
-          studentId: attempt.studentId,
-          studentName: attempt.studentName,
-          status: finalAttemptStatus,
-          warningCount: attempt.warningCount || 0
-        },
-        attempt.studentId
-      );
+      if (!result) {
+        const err: any = new Error(`Result for attempt ${attempt.attemptId} could not be created`);
+        err.statusCode = 500;
+        throw err;
+      }
+      if (resultCreated) {
+        emitTeacherAndAdmin(exam.createdBy, 'result.created', { result: result.toJSON() }, attempt.studentId);
+        emitTeacherAndAdmin(
+          exam.createdBy,
+          'proctoring.completed',
+          {
+            attemptId: attempt.attemptId,
+            examId: exam.examId,
+            studentId: attempt.studentId,
+            studentName: attempt.studentName,
+            status: effectiveFinalStatus,
+            warningCount: attempt.warningCount || 0
+          },
+          attempt.studentId
+        );
+      }
     }
 
-    return { attempt, result };
+    return { attempt: finalizedAttempt, result };
+  }
+
+  static async forceEndExam(exam: IExamDocument, actorId: string): Promise<void> {
+    const activeAttempts = await ExamAttempt.find({ examId: exam.examId, status: 'IN_PROGRESS' })
+      .select('attemptId studentId')
+      .lean();
+    await Promise.all(
+      activeAttempts.map(async attempt => {
+        let finalizedAttempt: IExamAttemptDocument | null = null;
+        let result: IResultDocument | null = null;
+        for (let retry = 0; retry < 5; retry += 1) {
+          const currentAttempt = await ExamAttempt.findOne({
+            attemptId: attempt.attemptId,
+            examId: exam.examId,
+            status: 'IN_PROGRESS'
+          });
+          if (!currentAttempt) break;
+          try {
+            await this.evaluateAndCreateResult(
+              currentAttempt,
+              exam,
+              currentAttempt.answers || [],
+              'FORCE_SUBMITTED'
+            );
+          } catch (error: any) {
+            if (error?.statusCode !== 409) throw error;
+          }
+          finalizedAttempt = await ExamAttempt.findOne({
+            attemptId: attempt.attemptId,
+            status: { $ne: 'IN_PROGRESS' }
+          });
+          result = await Result.findOne({ attemptId: attempt.attemptId });
+          if (finalizedAttempt && result) break;
+        }
+
+        if (!finalizedAttempt || !result) {
+          for (let retry = 0; retry < 20 && (!finalizedAttempt || !result); retry += 1) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+            finalizedAttempt = await ExamAttempt.findOne({
+              attemptId: attempt.attemptId,
+              status: { $ne: 'IN_PROGRESS' }
+            });
+            result = await Result.findOne({ attemptId: attempt.attemptId });
+          }
+        }
+        if (!finalizedAttempt || !result) {
+          const err: any = new Error(`Attempt ${attempt.attemptId} could not be finalized during exam end.`);
+          err.statusCode = 500;
+          throw err;
+        }
+
+        const notifyClaim = await ExamAttempt.updateOne(
+          { attemptId: attempt.attemptId, forceEndNotifiedAt: { $exists: false } },
+          { $set: { forceEndNotifiedAt: new Date() } }
+        );
+        if (notifyClaim.modifiedCount > 0) {
+          emitTeacherAndAdmin(
+            exam.createdBy,
+            'monitoring.updated',
+            { attempt: this.sanitizeAttemptForStaff(finalizedAttempt) },
+            actorId
+          );
+          emitToRooms(
+            `student:${attempt.studentId}`,
+            'exam.forceEnded',
+            {
+              examId: exam.examId,
+              attemptId: attempt.attemptId,
+              attempt: this.sanitizeAttemptForStudent(finalizedAttempt),
+              resultId: result.resultId,
+              message: 'Exam ended by faculty/admin. Your attempt was submitted automatically.'
+            },
+            actorId
+          );
+        }
+      })
+    );
   }
 
   /**
@@ -286,7 +424,7 @@ export class AttemptService {
     }
 
     const exam = await Exam.findOne({ examId });
-    if (!exam) {
+    if (!exam || exam.deleting) {
       const err: any = new Error(`Exam with ID ${examId} not found`);
       err.statusCode = 404;
       throw err;
@@ -340,15 +478,28 @@ export class AttemptService {
       if (now.getTime() > activeAttempt.expiresAt.getTime()) {
         const activeExam = activeAttempt.examId === examId ? exam : await Exam.findOne({ examId: activeAttempt.examId });
         if (!activeExam) {
-          const err: any = new Error('The active examination could not be loaded. Contact an administrator.');
-          err.statusCode = 409;
-          throw err;
+          await ExamAttempt.deleteOne({ attemptId: activeAttempt.attemptId, status: 'IN_PROGRESS' });
+          activeAttempt = null;
+        } else {
+          await this.evaluateAndCreateResult(activeAttempt, activeExam, activeAttempt.answers || [], 'EXPIRED');
+          activeAttempt = null;
         }
-        await this.evaluateAndCreateResult(activeAttempt, activeExam, activeAttempt.answers || [], 'EXPIRED');
-        activeAttempt = null;
       } else {
-        if (activeAttempt.examId !== examId) {
-          const activeExam = await Exam.findOne({ examId: activeAttempt.examId }).select('title');
+        const activeExam = activeAttempt.examId === examId
+          ? exam
+          : await Exam.findOne({ examId: activeAttempt.examId });
+        if (!activeExam) {
+          await ExamAttempt.deleteOne({ attemptId: activeAttempt.attemptId, status: 'IN_PROGRESS' });
+          activeAttempt = null;
+        } else if (!['PUBLISHED', 'LIVE'].includes(activeExam.status)) {
+          await this.evaluateAndCreateResult(
+            activeAttempt,
+            activeExam,
+            activeAttempt.answers || [],
+            'FORCE_SUBMITTED'
+          );
+          activeAttempt = null;
+        } else if (activeAttempt.examId !== examId) {
           const err: any = new Error(
             `You already have ${activeExam?.title || activeAttempt.examId} — In Progress (attempt ${activeAttempt.attemptId}). Finish or resume it before starting another examination.`
           );
@@ -356,14 +507,16 @@ export class AttemptService {
           (err as any).details = { examId: activeAttempt.examId, attemptId: activeAttempt.attemptId };
           throw err;
         }
-        if (!activeAttempt.deviceSessionId) {
+        if (!activeAttempt) {
+          // The orphaned or ended attempt was cleared above; continue with a fresh attempt.
+        } else if (!activeAttempt.deviceSessionId) {
           await ExamAttempt.updateOne(
             { attemptId: activeAttempt.attemptId, deviceSessionId: '' },
             { $set: { deviceSessionId } }
           );
           activeAttempt = await ExamAttempt.findOne({ attemptId: activeAttempt.attemptId }) || activeAttempt;
         }
-        if (activeAttempt.deviceSessionId !== deviceSessionId) {
+        if (activeAttempt && activeAttempt.deviceSessionId !== deviceSessionId) {
           const err: any = new Error(
             `Exam ${exam.title} — In Progress (attempt ${activeAttempt.attemptId}) in another browser or device.`
           );
@@ -371,26 +524,28 @@ export class AttemptService {
           (err as any).details = { examId: activeAttempt.examId, attemptId: activeAttempt.attemptId };
           throw err;
         }
-        const questions = await Question.find({
-          questionId: { $in: exam.questions },
-          status: 'ACTIVE'
-        });
-        const questionMap = new Map(questions.map(question => [question.questionId, question]));
-        const orderedQuestions = exam.questions
-          .map(questionId => questionMap.get(questionId))
-          .filter(question => question !== undefined);
-        const remainingSeconds = Math.max(
-          0,
-          Math.floor((activeAttempt.expiresAt.getTime() - now.getTime()) / 1000)
-        );
-        return {
-          resumed: true,
-          attempt: this.sanitizeAttemptForStudent(activeAttempt),
-          exam: this.sanitizeExamForStudent(exam),
-          questions: this.sanitizeQuestionsForStudent(orderedQuestions),
-          remainingSeconds,
-          suspended: activeAttempt.suspended
-        };
+        if (activeAttempt) {
+          const questions = await Question.find({
+            questionId: { $in: exam.questions },
+            status: 'ACTIVE'
+          });
+          const questionMap = new Map(questions.map(question => [question.questionId, question]));
+          const orderedQuestions = exam.questions
+            .map(questionId => questionMap.get(questionId))
+            .filter(question => question !== undefined);
+          const remainingSeconds = Math.max(
+            0,
+            Math.floor((activeAttempt.expiresAt.getTime() - now.getTime()) / 1000)
+          );
+          return {
+            resumed: true,
+            attempt: this.sanitizeAttemptForStudent(activeAttempt),
+            exam: this.sanitizeExamForStudent(exam),
+            questions: this.sanitizeQuestionsForStudent(orderedQuestions),
+            remainingSeconds,
+            suspended: activeAttempt.suspended
+          };
+        }
       }
     }
 
@@ -398,7 +553,9 @@ export class AttemptService {
     const completedAttemptsCount = await ExamAttempt.countDocuments({
       examId,
       studentId: user.userId,
-      status: { $in: ['SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED'] }
+      status: {
+        $in: ['SUBMITTED', 'AUTO_SUBMITTED', 'EXPIRED', 'EVALUATED', 'TERMINATED', 'FORCE_SUBMITTED']
+      }
     });
 
     const attemptLimit = exam.attemptLimit || 1;
@@ -460,6 +617,20 @@ export class AttemptService {
         ? { examId: competingAttempt.examId, attemptId: competingAttempt.attemptId }
         : undefined;
       throw conflict;
+    }
+
+    const currentExam = await Exam.findOne({ examId });
+    if (!currentExam || !['PUBLISHED', 'LIVE'].includes(currentExam.status)) {
+      if (!currentExam) {
+        await ExamAttempt.deleteOne({ attemptId: attempt.attemptId, status: 'IN_PROGRESS' });
+      } else if (currentExam.status === 'ENDED' || currentExam.status === 'CLOSED') {
+        await this.forceEndExam(currentExam, currentExam.createdBy);
+      }
+      const err: any = new Error(
+        currentExam ? 'Examination is no longer accepting attempts.' : 'Examination no longer exists.'
+      );
+      err.statusCode = currentExam ? 409 : 404;
+      throw err;
     }
 
     await ExamAssignment.findOneAndUpdate(
@@ -529,8 +700,16 @@ export class AttemptService {
     this.assertDeviceOwnership(attempt, user, deviceSessionId);
 
     if (attempt.status !== 'IN_PROGRESS') {
+      const result = await Result.findOne({ attemptId: attempt.attemptId });
+      if (result) {
+        return {
+          attempt: this.sanitizeAttemptForStudent(attempt),
+          resultId: result.resultId,
+          status: result.status
+        };
+      }
       const err: any = new Error(`Attempt has already been finalized with status ${attempt.status}`);
-      err.statusCode = 400;
+      err.statusCode = 409;
       throw err;
     }
     if (attempt.suspended) {
@@ -540,7 +719,7 @@ export class AttemptService {
     }
 
     const exam = await Exam.findOne({ examId: attempt.examId });
-    if (!exam) {
+    if (!exam || exam.deleting) {
       const err: any = new Error(`Associated exam ${attempt.examId} not found`);
       err.statusCode = 404;
       throw err;
@@ -548,25 +727,38 @@ export class AttemptService {
 
     // Check server-side exam status & timer expiration BEFORE accepting new answers
     if (
+      exam.deleting ||
       exam.status === 'ENDED' ||
       exam.status === 'CLOSED' ||
       exam.status === 'ARCHIVED' ||
       exam.status === 'RESULT_PUBLISHED'
     ) {
-      await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
-      const err: any = new Error(
-        `Examination has already ${exam.status.toLowerCase()}. Cannot continue or submit new answers.`
+      const finalized = await this.evaluateAndCreateResult(
+        attempt,
+        exam,
+        attempt.answers || [],
+        'FORCE_SUBMITTED'
       );
-      err.statusCode = 400;
-      throw err;
+      return {
+        attempt: this.sanitizeAttemptForStudent(finalized.attempt),
+        resultId: finalized.result.resultId,
+        status: finalized.result.status
+      };
     }
 
     const now = new Date();
     if (now.getTime() > attempt.expiresAt.getTime()) {
-      await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
-      const err: any = new Error('Exam attempt has expired. Submissions after time expiration are rejected.');
-      err.statusCode = 400;
-      throw err;
+      const finalized = await this.evaluateAndCreateResult(
+        attempt,
+        exam,
+        attempt.answers || [],
+        'EXPIRED'
+      );
+      return {
+        attempt: this.sanitizeAttemptForStudent(finalized.attempt),
+        resultId: finalized.result.resultId,
+        status: finalized.result.status
+      };
     }
 
     // Validate answers against exam questions and option IDs (use saved attempt.answers if payload.answers is omitted)
@@ -678,7 +870,7 @@ export class AttemptService {
     }
 
     const exam = await Exam.findOne({ examId: attempt.examId });
-    if (!exam) {
+    if (!exam || exam.deleting) {
       const err: any = new Error('Exam not found');
       err.statusCode = 404;
       throw err;
@@ -690,20 +882,17 @@ export class AttemptService {
       exam.status === 'ARCHIVED' ||
       exam.status === 'RESULT_PUBLISHED'
     ) {
-      await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
       const err: any = new Error(
         `Cannot save answers: Examination has already ${exam.status.toLowerCase()}.`
       );
-      err.statusCode = 400;
+      err.statusCode = 409;
       throw err;
     }
 
     const now = new Date();
     if (now.getTime() > attempt.expiresAt.getTime()) {
-      await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
-      const err: any = new Error('Exam attempt has expired');
-      err.statusCode = 400;
-      throw err;
+      const finalized = await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
+      return { attempt: this.sanitizeAttemptForStudent(finalized.attempt), remainingSeconds: 0 };
     }
 
     if (!Array.isArray(answers)) {
@@ -823,13 +1012,40 @@ export class AttemptService {
     const now = new Date();
     if (now.getTime() >= attempt.expiresAt.getTime()) {
       const exam = await Exam.findOne({ examId: attempt.examId });
-      const evaluation = exam
-        ? await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED')
-        : undefined;
+      if (!exam || exam.deleting) {
+        const err: any = new Error('Exam not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const evaluation = await this.evaluateAndCreateResult(
+        attempt,
+        exam,
+        attempt.answers || [],
+        'EXPIRED'
+      );
       return {
-        attempt: this.sanitizeAttemptForStudent(attempt),
+        attempt: this.sanitizeAttemptForStudent(evaluation.attempt),
         remainingSeconds: 0,
-        result: evaluation?.result
+        result: evaluation.result
+      };
+    }
+
+    const exam = await Exam.findOne({ examId: attempt.examId });
+    if (!exam || exam.deleting) {
+      const err: any = new Error('Exam not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (!['PUBLISHED', 'LIVE'].includes(exam.status)) {
+      await this.forceEndExam(exam, exam.createdBy);
+      const [finalizedAttempt, result] = await Promise.all([
+        ExamAttempt.findOne({ attemptId }),
+        Result.findOne({ attemptId })
+      ]);
+      return {
+        attempt: this.sanitizeAttemptForStudent(finalizedAttempt || attempt),
+        remainingSeconds: 0,
+        result: result || undefined
       };
     }
 
@@ -853,7 +1069,7 @@ export class AttemptService {
       throw err;
     }
 
-    const [exam, student] = await Promise.all([
+    const [monitoringExam, student] = await Promise.all([
       Exam.findOne({ examId: attempt.examId }).select('createdBy').lean(),
       User.findOne({ userId: attempt.studentId }).select('managedBy teacherIds').lean()
     ]);
@@ -861,7 +1077,7 @@ export class AttemptService {
       Array.from(new Set([
         ...(student?.managedBy || []),
         ...(student?.teacherIds || []),
-        exam?.createdBy || ''
+        monitoringExam?.createdBy || ''
       ])),
       'monitoring.updated',
       { attempt: this.sanitizeAttemptForStudent(updatedAttempt) },
@@ -885,7 +1101,7 @@ export class AttemptService {
     }
 
     const exam = await Exam.findOne({ examId: attempt.examId });
-    if (!exam) {
+    if (!exam || exam.deleting) {
       const err: any = new Error('Exam not found');
       err.statusCode = 404;
       throw err;
@@ -911,14 +1127,16 @@ export class AttemptService {
       }
     }
 
+    let currentAttempt: IExamAttemptDocument = attempt;
     const now = new Date();
     if (attempt.status === 'IN_PROGRESS' && now.getTime() > attempt.expiresAt.getTime()) {
-      await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
+      const finalized = await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED');
+      currentAttempt = finalized.attempt;
     }
 
     const remainingSeconds =
-      attempt.status === 'IN_PROGRESS'
-        ? Math.max(0, Math.floor((attempt.expiresAt.getTime() - now.getTime()) / 1000))
+      currentAttempt.status === 'IN_PROGRESS'
+        ? Math.max(0, Math.floor((currentAttempt.expiresAt.getTime() - now.getTime()) / 1000))
         : 0;
 
     if (user.role === 'STUDENT') {
@@ -930,7 +1148,7 @@ export class AttemptService {
         .filter((q): q is IQuestionDocument => Boolean(q));
 
       return {
-        attempt: this.sanitizeAttemptForStudent(attempt),
+        attempt: this.sanitizeAttemptForStudent(currentAttempt),
         exam: this.sanitizeExamForStudent(exam),
         questions: this.sanitizeQuestionsForStudent(orderedQuestions),
         remainingSeconds
@@ -938,7 +1156,7 @@ export class AttemptService {
     }
 
     return {
-      attempt: this.sanitizeAttemptForStaff(attempt),
+      attempt: this.sanitizeAttemptForStaff(currentAttempt),
       remainingSeconds
     };
   }

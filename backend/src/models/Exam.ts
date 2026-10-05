@@ -27,6 +27,7 @@ export interface IExamDocument extends Document {
   startDateTime?: Date;
   endDateTime?: Date;
   publishedAt?: Date;
+  deleting: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -166,6 +167,11 @@ const ExamSchema = new Schema<IExamDocument>(
     },
     publishedAt: {
       type: Date
+    },
+    deleting: {
+      type: Boolean,
+      default: false,
+      index: true
     }
   },
   {

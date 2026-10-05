@@ -299,7 +299,9 @@ async function runPhase13Tests() {
     assert.strictEqual(s1Proc.status, 201);
 
     const stuGetProc = await apiRequest('GET', '/api/proctoring/events', undefined, s1Token);
-    assert.strictEqual(stuGetProc.status, 403, 'Students cannot list global proctoring events');
+    assert.strictEqual(stuGetProc.status, 200, 'Students can list only their own proctoring events');
+    assert.strictEqual(stuGetProc.body.data.events.length, 1);
+    assert.strictEqual(stuGetProc.body.data.events[0].studentId, s1Id);
 
     const t2GetProc = await apiRequest('GET', `/api/proctoring/events?examId=${examId}`, undefined, t2Token);
     assert.strictEqual(t2GetProc.status, 403, 'Teacher 2 cannot view proctoring events for Teacher 1 exam');
@@ -367,6 +369,28 @@ async function runPhase13Tests() {
       0,
       'Unpublished results must never appear in student results list'
     );
+    const unpublishedRanking = await apiRequest(
+      'GET',
+      `/api/results/my-rankings?examId=${encodeURIComponent(examId)}`,
+      undefined,
+      s1Token
+    );
+    assert.strictEqual(unpublishedRanking.status, 200);
+    assert.strictEqual(unpublishedRanking.body.data.rankings.examRank, null);
+    assert.strictEqual(unpublishedRanking.body.data.rankings.overallRank, null);
+    assert.deepStrictEqual(
+      Object.keys(unpublishedRanking.body.data.rankings).sort(),
+      ['examRank', 'overallRank'],
+      'Student ranking response contains only aggregate ranking objects'
+    );
+
+    const facultyRanking = await apiRequest(
+      'GET',
+      `/api/results/my-rankings?examId=${encodeURIComponent(examId)}`,
+      undefined,
+      t1Token
+    );
+    assert.strictEqual(facultyRanking.status, 403, 'Aggregate student ranking endpoint is student-only');
 
     const s1DirectResultBefore = await apiRequest('GET', `/api/results/${resultId}`, undefined, s1Token);
     assert.strictEqual(
@@ -390,6 +414,101 @@ async function runPhase13Tests() {
     const s1DirectResultAfter = await apiRequest('GET', `/api/results/${resultId}`, undefined, s1Token);
     assert.strictEqual(s1DirectResultAfter.status, 200);
     assert.strictEqual(s1DirectResultAfter.body.data.result.score, 4);
+
+    const studentRanking = await apiRequest(
+      'GET',
+      `/api/results/my-rankings?examId=${encodeURIComponent(examId)}`,
+      undefined,
+      s1Token
+    );
+    assert.strictEqual(studentRanking.status, 200);
+    assert.deepStrictEqual(studentRanking.body.data.rankings.examRank, {
+      rank: 1,
+      totalRankedStudents: 1,
+      percentile: 100,
+      score: 4,
+      totalMarks: 10
+    });
+    assert.deepStrictEqual(studentRanking.body.data.rankings.overallRank, {
+      rank: 1,
+      totalRankedStudents: 1,
+      percentile: 100,
+      averagePercentage: 40,
+      examsAttempted: 1,
+      passed: 1
+    });
+    assert.ok(
+      !JSON.stringify(studentRanking.body.data.rankings).includes(s2Id),
+      'Student ranking endpoint must not disclose peer identifiers'
+    );
+    assert.ok(
+      !JSON.stringify(studentRanking.body.data.rankings).includes('studentName'),
+      'Student ranking endpoint must not disclose peer names'
+    );
+
+    await Result.create([
+      {
+        resultId: 'RES-RANK-TIE',
+        attemptId: 'ATT-RANK-TIE',
+        studentId: s2Id,
+        studentName: 'Peer Student',
+        examId,
+        examTitle: 'Test Examination',
+        subject: 'Mathematics',
+        score: 4,
+        totalMarks: 10,
+        passingMarks: 4,
+        percentage: 40,
+        passed: true,
+        status: 'PUBLISHED',
+        answers: [],
+        proctoringWarnings: 0,
+        submittedAt: new Date(Date.now() + 1000)
+      },
+      {
+        resultId: 'RES-RANK-UNPUBLISHED',
+        attemptId: 'ATT-RANK-UNPUBLISHED',
+        studentId: s2Id,
+        studentName: 'Peer Student',
+        examId,
+        examTitle: 'Test Examination',
+        subject: 'Mathematics',
+        score: 10,
+        totalMarks: 10,
+        passingMarks: 4,
+        percentage: 100,
+        passed: true,
+        status: 'PENDING',
+        answers: [],
+        proctoringWarnings: 0,
+        submittedAt: new Date(Date.now() + 2000)
+      }
+    ]);
+    const tiedStudentRanking = await apiRequest(
+      'GET',
+      `/api/results/my-rankings?examId=${encodeURIComponent(examId)}`,
+      undefined,
+      s1Token
+    );
+    assert.deepStrictEqual(tiedStudentRanking.body.data.rankings.examRank, {
+      rank: 1,
+      totalRankedStudents: 2,
+      percentile: 50,
+      score: 4,
+      totalMarks: 10
+    }, 'Equal published scores use competition rank and unpublished scores are excluded');
+    assert.deepStrictEqual(tiedStudentRanking.body.data.rankings.overallRank, {
+      rank: 1,
+      totalRankedStudents: 2,
+      percentile: 50,
+      averagePercentage: 40,
+      examsAttempted: 1,
+      passed: 1
+    });
+    assert.ok(
+      !JSON.stringify(tiedStudentRanking.body.data.rankings).includes(s2Id),
+      'Tied aggregate ranking still does not disclose peer identifiers'
+    );
 
     // Student 2 still receives 403 when trying to view Student 1's published result
     const s2DirectResult = await apiRequest('GET', `/api/results/${resultId}`, undefined, s2Token);

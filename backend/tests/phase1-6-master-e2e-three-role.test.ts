@@ -119,6 +119,38 @@ async function runMasterE2ETests() {
     assert.strictEqual(studentLogin.status, 200, 'Student login must succeed');
     const studentToken = studentLogin.body.data.token;
 
+    const separatelyManagedStudent = await apiRequest(
+      'POST',
+      '/api/users/students',
+      {
+        name: 'Admin Managed Student',
+        dob: '2005-01-10',
+        email: 'e2e_admin_student@examx.edu',
+        department: 'Computer Science & Engineering',
+        course: 'B.Tech CSE',
+        semester: 'Semester 4'
+      },
+      adminToken
+    );
+    assert.strictEqual(separatelyManagedStudent.status, 201);
+    const unauthorizedStudentDetails = await apiRequest(
+      'GET',
+      `/api/users/students/${separatelyManagedStudent.body.data.student.userId}`,
+      undefined,
+      teacherToken
+    );
+    assert.strictEqual(unauthorizedStudentDetails.status, 403, 'Faculty must not access an unrelated student profile');
+    const noAttemptProfile = await apiRequest(
+      'GET',
+      `/api/users/students/${separatelyManagedStudent.body.data.student.userId}`,
+      undefined,
+      adminToken
+    );
+    assert.strictEqual(noAttemptProfile.status, 200, 'Admin must be able to open the authorized student profile');
+    assert.strictEqual(noAttemptProfile.body.data.kpis.examsAttempted, 0);
+    assert.strictEqual(noAttemptProfile.body.data.kpis.examsNotAttempted, 0);
+    assert.deepStrictEqual(noAttemptProfile.body.data.examHistory, []);
+
     console.log('✓ Step 1: Admin, Teacher, and Student authentication & accounts verified');
 
     // -------------------------------------------------------------
@@ -541,6 +573,18 @@ Timestamp Ordering Protocol: Thomas write rule and multiversion concurrency cont
       false,
       'Unpublished results must not be exposed to student'
     );
+    const unpublishedProfile = await apiRequest(
+      'GET',
+      `/api/users/students/${studentId}`,
+      undefined,
+      teacherToken
+    );
+    assert.strictEqual(unpublishedProfile.status, 200);
+    const unpublishedExam = unpublishedProfile.body.data.examHistory.find((item: any) => item.examId === examId);
+    assert.ok(unpublishedExam, 'Student exam history must include assigned exams');
+    assert.strictEqual(unpublishedExam.resultVisibility, 'UNPUBLISHED');
+    assert.strictEqual(unpublishedExam.score, null, 'Unpublished scores must not be returned in the profile');
+    assert.ok(unpublishedProfile.body.data.assistance.total > 0, 'Assistance history summary must be included');
 
     // Teacher publishes results
     const publishRes = await apiRequest(
@@ -555,11 +599,26 @@ Timestamp Ordering Protocol: Thomas write rule and multiversion concurrency cont
     // Student can now view their published result
     const postPubResults = await apiRequest('GET', '/api/student/results', undefined, studentToken);
     assert.strictEqual(postPubResults.status, 200);
-    const studentResult = postPubResults.body.data.results.find((r: any) => r.examId === examId);
+    const studentResult = postPubResults.body.data.results.find(
+      (r: any) => r.examId === examId && r.studentId === studentId && r.attemptId === attemptId
+    );
     assert.ok(studentResult, 'Published result must be accessible to candidate');
     assert.strictEqual(studentResult.score, expectedScore);
     assert.strictEqual(studentResult.totalMarks, expectedScore);
     assert.strictEqual(studentResult.passed, true);
+    const publishedProfile = await apiRequest(
+      'GET',
+      `/api/users/students/${studentId}`,
+      undefined,
+      teacherToken
+    );
+    assert.strictEqual(publishedProfile.status, 200);
+    const publishedExam = publishedProfile.body.data.examHistory.find((item: any) => item.examId === examId);
+    assert.strictEqual(publishedExam.resultVisibility, 'PUBLISHED');
+    assert.ok(publishedExam.examRank, 'Published exam result must include aggregate exam rank');
+    assert.ok(publishedProfile.body.data.kpis.overallRank, 'Published results must include aggregate overall rank');
+    assert.ok(publishedProfile.body.data.proctoringSummary.totalEvents > 0, 'Proctoring must be aggregated for the student');
+    assert.strictEqual(publishedProfile.body.data.kpis.examsAttempted, 1, 'Multiple attempts should count as one exam attempted');
 
     console.log('✓ Step 5: Exam closure, result publication & candidate result access verified');
 

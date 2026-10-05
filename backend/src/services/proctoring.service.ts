@@ -75,7 +75,7 @@ export class ProctoringService {
 
     const examId = input.examId.trim();
     const exam = await Exam.findOne({ examId });
-    if (!exam) {
+    if (!exam || exam.deleting) {
       const err: any = new Error(`Exam ${examId} not found`);
       err.statusCode = 404;
       throw err;
@@ -173,6 +173,7 @@ export class ProctoringService {
           studentId: user.userId,
           status: 'IN_PROGRESS',
           deviceSessionId: input.deviceSessionId,
+          updatedAt: attempt.updatedAt,
           warningCount: originalWarningCount
         },
         {
@@ -230,6 +231,20 @@ export class ProctoringService {
       input.severity && VALID_SEVERITIES.includes(input.severity) ? input.severity : 'MEDIUM';
 
     const eventId = await generateNextProctoringEventId();
+    const currentExam = await Exam.findOne({ examId, deleting: { $ne: true } }).select('status').lean();
+    if (!currentExam || !['PUBLISHED', 'LIVE'].includes(currentExam.status)) {
+      const err: any = new Error('Proctoring events can only be recorded for an active examination');
+      err.statusCode = 409;
+      throw err;
+    }
+    if (
+      attemptId &&
+      !(await ExamAttempt.exists({ attemptId, studentId: user.userId, examId, status: 'IN_PROGRESS' }))
+    ) {
+      const err: any = new Error('Proctoring attempt was finalized before the event could be recorded');
+      err.statusCode = 409;
+      throw err;
+    }
     const eventDoc = await ProctoringEvent.create({
       eventId,
       attemptId,
@@ -244,6 +259,16 @@ export class ProctoringService {
         : {},
       timestamp: new Date()
     });
+    const examStillActive = await Exam.exists({ examId, deleting: { $ne: true } });
+    const attemptStillActive = !attemptId || Boolean(
+      await ExamAttempt.exists({ attemptId, studentId: user.userId, status: 'IN_PROGRESS' })
+    );
+    if (!examStillActive || !attemptStillActive) {
+      await ProctoringEvent.deleteOne({ eventId });
+      const err: any = new Error('Examination ended while the proctoring event was being recorded');
+      err.statusCode = 409;
+      throw err;
+    }
 
     const student = await User.findOne({ userId: user.userId })
       .select('managedBy teacherIds')
@@ -297,6 +322,20 @@ export class ProctoringService {
       const teacherExamIds = teacherExams.map(e => e.examId);
       const studentIds = assignedStudents.map(student => student.userId);
 
+      if (filters.examId && !teacherExamIds.includes(filters.examId)) {
+        const hasAssignedStudentAttempt = studentIds.length > 0
+          ? await ExamAttempt.exists({
+              examId: filters.examId,
+              studentId: { $in: studentIds }
+            })
+          : false;
+        if (!hasAssignedStudentAttempt) {
+          const err: any = new Error('Forbidden: You are not authorized to view proctoring events for this exam');
+          err.statusCode = 403;
+          throw err;
+        }
+      }
+
       if (filters.studentId && !studentIds.includes(filters.studentId)) {
         const studentOwnsExam = await ExamAttempt.exists({ studentId: filters.studentId, examId: { $in: teacherExamIds } });
         if (!studentOwnsExam) {
@@ -306,12 +345,14 @@ export class ProctoringService {
         }
       }
 
-      const ownershipFilter = {
-        $or: [
-          { examId: filters.examId ? filters.examId : { $in: teacherExamIds } },
-          { studentId: { $in: studentIds } }
-        ]
-      };
+      const ownershipClauses = [
+        ...(!filters.examId || teacherExamIds.includes(filters.examId)
+          ? [{ examId: filters.examId || { $in: teacherExamIds } }]
+          : []),
+        ...(studentIds.length ? [{ studentId: { $in: studentIds } }] : [])
+      ];
+      if (ownershipClauses.length === 0) return [];
+      const ownershipFilter = { $or: ownershipClauses };
       const query: any = filters.examId
         ? { $and: [ownershipFilter, { examId: filters.examId }] }
         : ownershipFilter;

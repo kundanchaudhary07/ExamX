@@ -74,7 +74,7 @@ export class QueryService {
 
     const examId = input.examId.trim();
     const exam = await Exam.findOne({ examId });
-    if (!exam) {
+    if (!exam || exam.deleting) {
       const err: any = new Error(`Exam ${examId} not found`);
       err.statusCode = 404;
       throw err;
@@ -149,6 +149,13 @@ export class QueryService {
       : undefined;
     const selectedAnswer = attemptAnswer?.selectedOption || '';
 
+    const examStillAvailable = await Exam.exists({ examId, deleting: { $ne: true } });
+    if (!examStillAvailable) {
+      const err: any = new Error(`Exam ${examId} was deleted before the query could be recorded`);
+      err.statusCode = 404;
+      throw err;
+    }
+
     const queryDoc = await StudentQuery.create({
       queryId,
       examId,
@@ -168,6 +175,12 @@ export class QueryService {
       status: 'PENDING',
       scoreAdjustment: 0
     });
+    if (!(await Exam.exists({ examId, deleting: { $ne: true } }))) {
+      await StudentQuery.deleteOne({ queryId });
+      const err: any = new Error(`Exam ${examId} was deleted while the query was being recorded`);
+      err.statusCode = 404;
+      throw err;
+    }
 
     // If a published result exists, mark it as QUERIED
     await Result.updateOne(
@@ -186,9 +199,15 @@ export class QueryService {
     });
 
     const queryJson = queryDoc.toJSON();
-    if (attempt && question && !attempt.reportedQuestionIds.includes(question.questionId)) {
-      attempt.reportedQuestionIds.push(question.questionId);
-      await attempt.save();
+    if (attempt && question) {
+      await ExamAttempt.updateOne(
+        {
+          attemptId: attempt.attemptId,
+          studentId: user.userId,
+          status: 'IN_PROGRESS'
+        },
+        { $addToSet: { reportedQuestionIds: question.questionId } }
+      );
     }
 
     emitToRooms(

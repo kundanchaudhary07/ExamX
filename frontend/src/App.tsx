@@ -110,6 +110,7 @@ export default function App() {
   const [timeLeft, setTimeLeft] = useState(1800);
   const [isLoadingExam, setIsLoadingExam] = useState(false);
   const [examEngineError, setExamEngineError] = useState<string | null>(null);
+  const [forceEndNotice, setForceEndNotice] = useState<string | null>(null);
   const [isTerminated, setIsTerminated] = useState(false);
   const [terminationReason, setTerminationReason] = useState('');
   const [lastSubmissionSummary, setLastSubmissionSummary] = useState<{
@@ -134,6 +135,10 @@ export default function App() {
   const [liveQuerySuccess, setLiveQuerySuccess] = useState<string | null>(null);
   const proctoringRef = useRef<ProctoringHandle>(null);
   const rejectedAttemptRef = useRef<string | null>(null);
+  const deletedExamIdsRef = useRef(new Set<string>());
+  const finishExamInProgressRef = useRef(false);
+  const finishedAttemptIdRef = useRef<string | null>(null);
+  const [isSubmittingExam, setIsSubmittingExam] = useState(false);
 
   // Unblock review request state for terminated student
   const [showUnblockRequestModal, setShowUnblockRequestModal] = useState(false);
@@ -197,7 +202,7 @@ export default function App() {
     });
   }, []);
 
-  const loadRoleData = useCallback(async (user: User) => {
+  const loadRoleData = useCallback(async (user: User): Promise<boolean> => {
     try {
       if (user.role === UserRole.STUDENT) {
         const [studentExams, publishedResults, studentQueries] = await Promise.all([
@@ -205,24 +210,45 @@ export default function App() {
           dbService.getMyPublishedResults(),
           dbService.getQueries()
         ]);
-        setScheduledExams(studentExams);
+        setScheduledExams(studentExams.filter(exam => !deletedExamIdsRef.current.has(exam.examId)));
         setAllResults(publishedResults);
         setAllQueries(studentQueries);
         setQuestionBank([]);
       } else {
-        const [examsData, questionsData, resultsData, queriesData] = await Promise.all([
+        const [examsData, questionsData] = await Promise.all([
           dbService.getExams(),
-          dbService.getQuestions(),
-          dbService.getResults(),
-          dbService.getQueries()
+          dbService.getQuestions()
         ]);
-        setScheduledExams(examsData);
+        setScheduledExams(examsData.filter(exam => !deletedExamIdsRef.current.has(exam.examId)));
         setQuestionBank(questionsData);
-        setAllResults(resultsData);
-        setAllQueries(queriesData);
+        setAllResults([]);
+        setAllQueries([]);
       }
+      return true;
     } catch {
       // Non-blocking initial load
+      return false;
+    }
+  }, []);
+
+  const refreshExaminationData = useCallback(async (user: User): Promise<boolean> => {
+    try {
+      const [exams, results, queries] = await Promise.all(
+        user.role === UserRole.STUDENT
+          ? [
+              dbService.getStudentExams(),
+              dbService.getMyPublishedResults(),
+              dbService.getQueries()
+            ]
+          : [dbService.getExams(), Promise.resolve([]), Promise.resolve([])]
+      );
+      setScheduledExams(exams.filter(exam => !deletedExamIdsRef.current.has(exam.examId)));
+      setAllResults(results);
+      setAllQueries(queries);
+      return true;
+    } catch (error) {
+      console.error('Unable to refresh examination data:', error);
+      return false;
     }
   }, []);
 
@@ -262,6 +288,82 @@ export default function App() {
     realtimeService.connect();
 
     const unsubEvents = realtimeService.subscribe(payload => {
+      if (payload.event === 'exam.forceEnded') {
+        const data = payload.data as {
+          examId?: string;
+          attemptId?: string;
+          attempt?: ExamAttemptRecord;
+          message?: string;
+        } | undefined;
+        if (
+          currentUser.role === UserRole.STUDENT &&
+          data?.attemptId &&
+          data.attemptId === activeAttempt?.attemptId
+        ) {
+          proctoringRef.current?.stopMediaStream();
+          setCameraStatus('OFFLINE');
+          setIsAttemptSuspended(false);
+          setIsSuspensionModalOpen(false);
+          if (document.fullscreenElement) {
+            void document.exitFullscreen().catch(() => undefined);
+          }
+          if (data.examId) {
+            setScheduledExams(previous => previous.map(exam =>
+              exam.examId === data.examId
+                ? {
+                    ...exam,
+                    studentAttemptId: data.attemptId,
+                    studentAttemptStatus: 'FORCE_SUBMITTED',
+                    attemptStatus: 'FORCE_SUBMITTED',
+                    activeAttemptId: null,
+                    studentAttempts: [
+                      ...(exam.studentAttempts || []).filter(
+                        attempt => attempt.attemptId !== data.attemptId
+                      ),
+                      {
+                        attemptId: data.attemptId!,
+                        status: 'FORCE_SUBMITTED',
+                        resultPublished: false
+                      }
+                    ]
+                  }
+                : exam
+            ));
+          }
+          setForceEndNotice(
+            data.message || 'Exam ended by faculty/admin. Your attempt was submitted automatically.'
+          );
+          setActiveAttempt(null);
+          setActiveScheduledExam(null);
+          setActiveTab('overview');
+          setView(ViewState.DASHBOARD);
+        }
+        return;
+      }
+
+      if (payload.event === 'exam.deleted') {
+        const examId = (payload.data as { examId?: string } | undefined)?.examId;
+        if (examId) {
+          deletedExamIdsRef.current.add(examId);
+          setScheduledExams(previous => previous.filter(exam => exam.examId !== examId));
+          setAllResults(previous => previous.filter(result => result.examId !== examId));
+          setAllQueries(previous => previous.filter(query => query.examId !== examId));
+          if (activeAttempt?.examId === examId || activeScheduledExam?.examId === examId) {
+            proctoringRef.current?.stopMediaStream();
+            setCameraStatus('OFFLINE');
+            setActiveAttempt(null);
+            setActiveScheduledExam(null);
+            if (document.fullscreenElement) {
+              void document.exitFullscreen().catch(() => undefined);
+            }
+            setForceEndNotice('This examination was deleted by an administrator.');
+            setActiveTab('overview');
+            setView(ViewState.DASHBOARD);
+          }
+        }
+        return;
+      }
+
       if (payload.event === 'notification.created' && payload.data) {
         const notif = payload.data as { id?: string; title?: string; timestamp?: string };
         if (notif.title) {
@@ -285,7 +387,9 @@ export default function App() {
 
       if (payload.event === 'result.published') {
         const result = (payload.data as { result?: unknown } | undefined)?.result;
-        if (result) updateResultState(mapBackendResultToFrontend(result));
+        if (result && currentUser?.role === UserRole.STUDENT) {
+          updateResultState(mapBackendResultToFrontend(result));
+        }
         return;
       }
 
@@ -296,17 +400,19 @@ export default function App() {
           publishedBy?: string;
         } | undefined;
         const publishedIds = new Set(data?.resultIds || []);
-        setAllResults(previous => previous.map(result =>
-          publishedIds.has(result.resultId)
-            ? {
-                ...result,
-                status: 'PUBLISHED',
-                isPublished: true,
-                publishedAt: data?.publishedAt || result.publishedAt,
-                publishedBy: data?.publishedBy || result.publishedBy
-              }
-            : result
-        ));
+        if (currentUser?.role === UserRole.STUDENT) {
+          setAllResults(previous => previous.map(result =>
+            publishedIds.has(result.resultId)
+              ? {
+                  ...result,
+                  status: 'PUBLISHED',
+                  isPublished: true,
+                  publishedAt: data?.publishedAt || result.publishedAt,
+                  publishedBy: data?.publishedBy || result.publishedBy
+                }
+              : result
+          ));
+        }
         return;
       }
 
@@ -314,6 +420,7 @@ export default function App() {
         const exam = (payload.data as { exam?: unknown } | undefined)?.exam;
         if (exam) {
           const incoming = mapBackendExamToFrontend(exam);
+          if (deletedExamIdsRef.current.has(incoming.examId)) return;
           setScheduledExams(previous => {
             const index = previous.findIndex(item => item.examId === incoming.examId);
             if (index < 0) return [incoming, ...previous];
@@ -325,7 +432,7 @@ export default function App() {
         return;
       }
 
-      if (payload.event === 'attempt.submitted') {
+      if (payload.event === 'attempt.submitted' && currentUser?.role === UserRole.STUDENT) {
         const resultId = (payload.data as { resultId?: string } | undefined)?.resultId;
         if (resultId) {
           void dbService.getResultById(resultId)
@@ -359,7 +466,7 @@ export default function App() {
 
       if (payload.event.startsWith('query.')) {
         const query = (payload.data as { query?: unknown } | undefined)?.query;
-        if (query) {
+        if (query && currentUser?.role === UserRole.STUDENT) {
           const incoming = mapBackendQueryToFrontend(query);
           setAllQueries(previous => {
             const index = previous.findIndex(item => item.queryId === incoming.queryId);
@@ -374,7 +481,9 @@ export default function App() {
 
       if (payload.event === 'result.created' || payload.event === 'result.updated') {
         const result = (payload.data as { result?: unknown } | undefined)?.result;
-        if (result) updateResultState(mapBackendResultToFrontend(result));
+        if (result && currentUser?.role === UserRole.STUDENT) {
+          updateResultState(mapBackendResultToFrontend(result));
+        }
       }
       if (
         payload.event === 'attempt.suspended' &&
@@ -453,7 +562,7 @@ export default function App() {
 
     const unsubStatus = realtimeService.subscribeStatus(status => {
       if (status.connected && status.reconnected) {
-        loadRoleData(currentUser);
+        void refreshExaminationData(currentUser);
         if (activeAttempt) {
           dbService.getAttemptById(activeAttempt.attemptId).then(async data => {
             setActiveAttempt(data.attempt);
@@ -527,7 +636,7 @@ export default function App() {
       unsubEvents();
       unsubStatus();
     };
-  }, [currentUser, activeAttempt?.attemptId, loadRoleData, updateResultState]);
+  }, [currentUser, activeAttempt?.attemptId, loadRoleData, refreshExaminationData, updateResultState]);
 
   // Toggle Dark Mode
   useEffect(() => {
@@ -769,14 +878,19 @@ export default function App() {
   };
 
   const handleDeleteExam = async (id: string) => {
-    const archivedExam = await dbService.updateExamStatus(id, 'ARCHIVED');
-    setScheduledExams(previous => previous.map(item =>
-      (item.examId || item.id) === (archivedExam.examId || archivedExam.id) ? archivedExam : item
-    ));
+    if (currentUser?.role !== UserRole.ADMIN) {
+      throw new Error('Only administrators can delete examinations.');
+    }
+    await dbService.deleteExam(id);
+    deletedExamIdsRef.current.add(id);
+    setScheduledExams(previous => previous.filter(item => (item.examId || item.id) !== id));
+    setAllResults(previous => previous.filter(result => result.examId !== id));
+    setAllQueries(previous => previous.filter(query => query.examId !== id));
   };
 
   // --- STUDENT EXAM FLOW ---
   const handleStartExam = (_subject: string, examId?: string) => {
+    setForceEndNotice(null);
     setExamEngineError(null);
     const found = examId
       ? scheduledExams.find((e) => e.examId === examId || e.id === examId)
@@ -945,15 +1059,14 @@ export default function App() {
 
   const finishExam = useCallback(
     async (terminated = false, reason = '') => {
+      if (finishExamInProgressRef.current) return;
       if (!activeAttempt) {
         setView(ViewState.DASHBOARD);
         return;
       }
 
-      // Exit fullscreen if active
-      if (typeof document !== 'undefined' && document.fullscreenElement && document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-      }
+      finishExamInProgressRef.current = true;
+      setIsSubmittingExam(true);
       setActiveWarningPopup(null);
       setExamEngineError(null);
 
@@ -965,7 +1078,11 @@ export default function App() {
           terminationReason: reason
         });
 
+        finishedAttemptIdRef.current = submitRes.attempt.attemptId;
         proctoringRef.current?.stopMediaStream();
+        if (typeof document !== 'undefined' && document.fullscreenElement && document.exitFullscreen) {
+          void document.exitFullscreen().catch(() => undefined);
+        }
         setLastSubmissionSummary({
           attempt: submitRes.attempt,
           resultPublished: submitRes.resultPublished,
@@ -973,9 +1090,38 @@ export default function App() {
           message: submitRes.message
         });
         if (submitRes.result) updateResultState(submitRes.result);
-        setView(ViewState.EXAM_RESULT);
+        setScheduledExams(previous =>
+          previous.map(exam =>
+            exam.examId === submitRes.attempt.examId
+              ? {
+                  ...exam,
+                  studentAttemptId: submitRes.attempt.attemptId,
+                  studentAttemptStatus: submitRes.attempt.status,
+                  attemptStatus: submitRes.attempt.status,
+                  activeAttemptId: null,
+                  studentAttempts: [
+                    ...(exam.studentAttempts || []).filter(
+                      attempt => attempt.attemptId !== submitRes.attempt.attemptId
+                    ),
+                    {
+                      attemptId: submitRes.attempt.attemptId,
+                      status: submitRes.attempt.status,
+                      resultPublished: submitRes.resultPublished
+                    }
+                  ]
+                }
+              : exam
+          )
+        );
+        setActiveAttempt(null);
+        setActiveScheduledExam(null);
+        setActiveTab('overview');
+        setView(ViewState.DASHBOARD);
       } catch (err: any) {
         setExamEngineError(err?.message || 'Failed to submit examination attempt');
+      } finally {
+        finishExamInProgressRef.current = false;
+        setIsSubmittingExam(false);
       }
     },
     [activeAttempt, answers, markedForReview, warningCount, buildBackendAnswersPayload, updateResultState]
@@ -1035,11 +1181,13 @@ export default function App() {
   useEffect(() => {
     if (view !== ViewState.EXAM_ACTIVE || !activeAttempt) return;
     const heartbeat = setInterval(() => {
-      dbService.heartbeatAttempt(activeAttempt.attemptId, {
+      const attemptId = activeAttempt.attemptId;
+      dbService.heartbeatAttempt(attemptId, {
         cameraStatus,
         faceStatus,
         fullscreenActive
       }).then(result => {
+        if (finishedAttemptIdRef.current === attemptId) return;
         setTimeLeft(result.remainingSeconds);
         if (result.attempt.suspended) setIsAttemptSuspended(true);
         if (result.attempt.status !== 'IN_PROGRESS') {
@@ -1054,6 +1202,7 @@ export default function App() {
           setView(ViewState.EXAM_RESULT);
         }
       }).catch((error: any) => {
+        if (finishedAttemptIdRef.current === attemptId) return;
         setExamEngineError(error?.message || 'Examination connection heartbeat failed.');
       });
     }, 15000);
@@ -1211,6 +1360,16 @@ export default function App() {
             : ''
         }`}
       >
+        {forceEndNotice && currentUser?.role === UserRole.STUDENT && view === ViewState.DASHBOARD && (
+          <div className="mx-4 mt-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+            <div className="flex items-center justify-between gap-3">
+              <span>{forceEndNotice}</span>
+              <button type="button" onClick={() => setForceEndNotice(null)} aria-label="Dismiss notice">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
         {view === ViewState.DASHBOARD && currentUser?.role === UserRole.STUDENT && (
           <StudentDashboard
             user={currentUser}
@@ -1222,6 +1381,7 @@ export default function App() {
             onStartExam={handleStartExam}
             onRaiseQuery={handleRaiseQuery}
             onRefreshData={() => loadRoleData(currentUser)}
+            onRefreshExamData={refreshExaminationData}
           />
         )}
 
@@ -1230,9 +1390,7 @@ export default function App() {
             user={currentUser}
             activeTab={activeTab}
             onNavigateTab={setActiveTab}
-            results={allResults}
             questions={questionBank}
-            queries={allQueries}
             exams={scheduledExams}
             onAddQuestion={handleAddQuestion}
             onUpdateQuestion={handleUpdateQuestion}
@@ -1243,6 +1401,7 @@ export default function App() {
             onSaveExam={handleSaveExam}
             onDeleteExam={handleDeleteExam}
             onRefreshData={() => loadRoleData(currentUser)}
+            onRefreshExamData={refreshExaminationData}
           />
         )}
 
@@ -1260,6 +1419,7 @@ export default function App() {
             onStatusChange={handleUpdateExamStatus}
             onResolveQuery={handleResolveQuery}
             onRefreshGlobalData={() => loadRoleData(currentUser)}
+            onRefreshExamData={refreshExaminationData}
           />
         )}
 
@@ -1526,19 +1686,12 @@ export default function App() {
                         <ChevronLeft className="w-3.5 h-3.5 mr-1" /> Prev
                       </button>
 
-                      {currentQIndex < examQuestions.length - 1 ? (
+                      {currentQIndex < examQuestions.length - 1 && (
                         <button
                           onClick={handleNextQuestion}
                           className="h-9.5 px-5 bg-blue-600 text-white rounded-xl font-medium text-[13px] hover:bg-blue-700 inline-flex items-center transition-all"
                         >
                           Next <ChevronRight className="w-3.5 h-3.5 ml-1" />
-                        </button>
-                      ) : (
-                        <button
-                          onClick={handleRequestFinishExam}
-                          className="h-9.5 px-5 bg-emerald-600 text-white rounded-xl font-medium text-[13px] hover:bg-emerald-700 inline-flex items-center transition-all"
-                        >
-                          Submit Exam <CheckCircle className="w-3.5 h-3.5 ml-1.5" />
                         </button>
                       )}
                     </div>
@@ -1555,11 +1708,21 @@ export default function App() {
                   </div>
                   <button
                     type="button"
+                    disabled={isSubmittingExam}
                     onClick={handleRequestFinishExam}
-                    className="w-full sm:w-auto h-9.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-medium text-[13px] shadow-sm shadow-emerald-600/20 inline-flex items-center justify-center gap-1.5 transition-colors"
+                    className="w-full sm:w-auto h-9.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-medium text-[13px] shadow-sm shadow-emerald-600/20 inline-flex items-center justify-center gap-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    <CheckCircle className="w-4 h-4" />
-                    Submit Examination
+                    {isSubmittingExam ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Submitting...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        Submit Examination
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -1646,14 +1809,6 @@ export default function App() {
                     })}
                   </div>
 
-                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800">
-                    <button
-                      onClick={handleRequestFinishExam}
-                      className="w-full h-9.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-xl font-medium text-[13px] hover:opacity-90 transition-opacity inline-flex items-center justify-center"
-                    >
-                      Final Submit Exam
-                    </button>
-                  </div>
                 </div>
               </div>
             </div>

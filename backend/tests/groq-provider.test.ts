@@ -28,10 +28,12 @@ const generationParams = {
   syllabusText
 };
 
-function generatedResponse() {
+function generatedResponse(
+  count = 1,
+  overrides: Record<string, unknown> = {}
+) {
   return {
-    questions: [{
-      questionText: 'Which memory arrangement is specified for arrays in the syllabus?',
+    questions: Array.from({ length: count }, (_, index) => ({
       subject: generationParams.subject,
       course: generationParams.course,
       semester: generationParams.semester,
@@ -48,8 +50,12 @@ function generatedResponse() {
       ],
       correctOption: 'A',
       marks: 2,
-      explanation: 'The supplied syllabus states that arrays use contiguous memory locations.'
-    }]
+      explanation: 'The supplied syllabus states that arrays use contiguous memory locations.',
+      ...overrides,
+      questionText: index === 0
+        ? String(overrides.questionText || 'Which memory arrangement is specified for arrays in the syllabus?')
+        : `Which memory arrangement is specified for arrays in the syllabus, question ${index + 1}?`
+    }))
   };
 }
 
@@ -235,6 +241,108 @@ async function run(): Promise<void> {
     }
 
     {
+      for (const count of [5, 10]) {
+        let capturedRequest: any;
+        const client = groqClient(async (request) => {
+          capturedRequest = request;
+          return { choices: [{ message: { content: JSON.stringify(generatedResponse(count)) } }] };
+        });
+        const result = await AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          count
+        }, client, noWait);
+        assert.equal(result.drafts.length, count, `Small syllabus must return exactly ${count} questions`);
+        assert.match(capturedRequest.messages[1].content, new RegExp(`exactly ${count}`));
+        assert(result.drafts.every((draft) =>
+          draft.subject === generationParams.subject &&
+          draft.syllabusUnit === 'UNIT 1' &&
+          draft.sourceReference === 'Arrays use contiguous memory locations.'
+        ), 'Small-syllabus results retain subject, unit, and syllabus provenance');
+      }
+
+      const selectedUnitSyllabus = [
+        'UNIT I: Data structures',
+        'Arrays store values in contiguous memory locations.',
+        'UNIT II: Graph algorithms',
+        'Graphs contain vertices and edges. Breadth-first search traverses graph structures.'
+      ].join('\n');
+      let selectedPrompt = '';
+      const selectedUnitClient = groqClient(async (request) => {
+        selectedPrompt = request.messages[1].content;
+        const response = generatedResponse(10, {
+          topic: 'all',
+          syllabusUnit: 'UNIT 2',
+          syllabusTopic: 'Breadth-first search',
+          sourceReference: 'Breadth-first search traverses graph structures.'
+        });
+        return { choices: [{ message: { content: JSON.stringify(response) } }] };
+      });
+      const selectedResult = await AiQuestionService.generateQuestionsForReview({
+        ...generationParams,
+        topic: 'all',
+        count: 10,
+        syllabusText: selectedUnitSyllabus,
+        selectedUnits: ['UNIT II']
+      }, selectedUnitClient, noWait);
+      assert.equal(selectedResult.drafts.length, 10);
+      assert(selectedResult.drafts.every((draft) =>
+        draft.syllabusUnit === 'UNIT 2' &&
+        draft.sourceReference === 'Breadth-first search traverses graph structures.'
+      ));
+      assert(selectedPrompt.includes('UNIT II: Graph algorithms'));
+      assert(!selectedPrompt.includes('Arrays store values'));
+    }
+
+    {
+      const largeSyllabus = [
+        'Data Structures & Algorithms course syllabus.',
+        'UNIT I: Data structures',
+        'Arrays store values in contiguous memory locations.',
+        'UNIT II: Data structures',
+        ...Array.from({ length: 300 }, () =>
+          'Data structures include arrays and linked lists. Arrays use contiguous memory locations. Linked lists store nodes connected by pointers.'
+        )
+      ].join('\n');
+      assert(largeSyllabus.length > 12_000);
+      let providerCalls = 0;
+      let capturedPrompt = '';
+      const client = groqClient(async (request) => {
+        providerCalls++;
+        capturedPrompt = request.messages[1].content;
+        return {
+          choices: [{
+            message: {
+              content: JSON.stringify(generatedResponse(5, { sourceReference: 'Arrays store values in contiguous memory locations.' }))
+            }
+          }]
+        };
+      });
+      const selected = await AiQuestionService.generateQuestionsForReview({
+        ...generationParams,
+        count: 5,
+        syllabusText: largeSyllabus,
+        selectedUnits: ['UNIT I']
+      }, client, noWait);
+      assert.equal(selected.drafts.length, 5);
+      assert(capturedPrompt.includes('Arrays store values in contiguous memory locations.'));
+      assert(!capturedPrompt.includes('UNIT II: Data structures'));
+
+      const callsBeforeAllUnits = providerCalls;
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          topic: 'all',
+          syllabusText: largeSyllabus
+        }, client, noWait),
+        (error: any) =>
+          error.statusCode === 413 &&
+          error.code === 'AI_SYLLABUS_CONTEXT_TOO_LARGE' &&
+          /Select fewer units/.test(error.message)
+      );
+      assert.equal(providerCalls, callsBeforeAllUnits, 'Oversized all-unit context is rejected before Groq');
+    }
+
+    {
       delete process.env.GROQ_API_KEY;
       assert.equal(AiQuestionService.getStatus().configured, false);
       await assert.rejects(
@@ -319,7 +427,7 @@ async function run(): Promise<void> {
 
       assert.equal(providerCalls, 1, 'A 500+ word syllabus reaches the configured provider');
       assert.equal(capturedRequest.model, 'openai/gpt-oss-120b');
-      assert.match(capturedRequest.messages[1].content, /Generate 20 rigorous/);
+      assert.match(capturedRequest.messages[1].content, /Generate exactly 20 rigorous/);
       assert.match(capturedRequest.messages[1].content, /across all relevant units and topics/);
       assert.doesNotMatch(capturedRequest.messages[1].content, /focusing on topic\/unit "all"/i);
       assert(capturedRequest.messages[1].content.includes(mediumLengthDbmsSyllabus));
@@ -374,6 +482,43 @@ async function run(): Promise<void> {
       assert.equal(calls, 1, `HTTP ${status} is not retried`);
     }
 
+    {
+      let calls = 0;
+      const oversizedRequestClient = groqClient(async () => {
+        calls++;
+        throw Object.assign(new Error('provider status 413'), { status: 413 });
+      });
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview(generationParams, oversizedRequestClient, noWait),
+        (error: any) =>
+          error.statusCode === 413 &&
+          error.code === 'AI_SYLLABUS_CONTEXT_TOO_LARGE' &&
+          /Select fewer syllabus units/.test(error.message)
+      );
+      assert.equal(calls, 1, 'HTTP 413 is not retried');
+    }
+
+    for (const returnedCount of [9, 11]) {
+      const countMismatchClient = groqClient(async () => ({
+        choices: [{
+          finish_reason: 'stop',
+          message: { content: JSON.stringify(generatedResponse(returnedCount)) }
+        }],
+        usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 }
+      }));
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          count: 10
+        }, countMismatchClient, noWait),
+        (error: any) =>
+          error.code === 'AI_INVALID_RESPONSE' &&
+          error.statusCode === 502 &&
+          error.message.includes(`returned ${returnedCount} questions`) &&
+          error.message.includes('exactly 10')
+      );
+    }
+
     for (const status of [429, 500]) {
       let calls = 0;
       await assert.rejects(
@@ -417,6 +562,29 @@ async function run(): Promise<void> {
       wordCount: syllabusText.split(/\s+/).length,
       extractedText: syllabusText
     });
+
+    {
+      const shortResponseClient = groqClient(async () => ({
+        choices: [{ message: { content: JSON.stringify(generatedResponse(4)) } }]
+      }));
+      await assert.rejects(
+        () => AiQuestionService.generateQuestions({
+          ...generationParams,
+          count: 5
+        }, teacher, shortResponseClient, noWait),
+        (error: any) => error.code === 'AI_INVALID_RESPONSE' && /returned 4 questions/.test(error.message)
+      );
+      assert.equal(
+        await Question.countDocuments({ syllabusId }),
+        0,
+        'Wrong-count responses persist no partial question drafts'
+      );
+      assert.equal(
+        await AiGenerationBatch.countDocuments({ syllabusId }),
+        0,
+        'Wrong-count responses do not persist a generation batch'
+      );
+    }
 
     {
       let calls = 0;

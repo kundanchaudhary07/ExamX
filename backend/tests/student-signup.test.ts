@@ -162,6 +162,85 @@ async function run(): Promise<void> {
     });
     assert.equal(login.status, 200);
     const studentToken = login.body.data.token as string;
+    assert.equal(login.body.data.user.role, 'STUDENT');
+    assert.equal(login.body.data.user.userId, createdUserId);
+    const signupMe = await request('GET', '/api/auth/me', undefined, studentToken);
+    assert.equal(signupMe.status, 200);
+    assert.equal(signupMe.body.data.user.userId, createdUserId);
+    assert.equal(signupMe.body.data.user.name, 'New Student');
+
+    await assert.rejects(
+      AuthService.login(
+        signupData.credentials.studentId,
+        `${signupData.credentials.initialPassword}x`
+      ),
+      (error: any) => error.statusCode === 401
+    );
+    await assert.rejects(
+      AuthService.login(
+        `${signupData.credentials.studentId}0`,
+        signupData.credentials.initialPassword
+      ),
+      (error: any) => error.statusCode === 401
+    );
+
+    const provisionedStudent = await request(
+      'POST',
+      '/api/users/students',
+      {
+        name: 'Faculty Created Student',
+        dob: '2003-08-17',
+        email: `faculty-created-${Date.now()}@example.test`,
+        course: 'B.Tech CSE',
+        department: 'Computer Science',
+        semester: 'Semester 2'
+      },
+      assignedFacultyLogin.body.data.token
+    );
+    assert.equal(provisionedStudent.status, 201);
+    const provisionedData = provisionedStudent.body.data;
+    const provisionedId = provisionedData.credentials.userId as string;
+    const provisionedPassword = provisionedData.credentials.password as string;
+    createdStudentIds.push(provisionedId);
+    assert.equal(provisionedData.student.role, 'STUDENT');
+    assert.equal(provisionedData.student.status, 'ACTIVE');
+    assert.equal(provisionedData.student.passwordHash, undefined);
+    const provisionedRecord = await User.findOne({ userId: provisionedId }).select('+passwordHash');
+    assert(provisionedRecord);
+    assert(await verifyPassword(provisionedPassword, provisionedRecord.passwordHash));
+    const provisionedLogin = await request('POST', '/api/auth/login', {
+      userId: provisionedId,
+      password: provisionedPassword
+    });
+    assert.equal(provisionedLogin.status, 200);
+    assert.equal(provisionedLogin.body.data.user.role, 'STUDENT');
+    assert.equal(provisionedLogin.body.data.user.userId, provisionedId);
+    const provisionedMe = await request(
+      'GET',
+      '/api/auth/me',
+      undefined,
+      provisionedLogin.body.data.token
+    );
+    assert.equal(provisionedMe.status, 200);
+    assert.equal(provisionedMe.body.data.user.name, 'Faculty Created Student');
+    await assert.rejects(
+      AuthService.login(provisionedId, `${provisionedPassword}x`),
+      (error: any) => error.statusCode === 401
+    );
+
+    const blockedStudentId = await generateNextStudentId();
+    await User.create({
+      userId: blockedStudentId,
+      name: 'Inactive Student',
+      passwordHash: await hashPassword('Inactive@2000'),
+      role: 'STUDENT',
+      status: 'INACTIVE'
+    });
+    createdStudentIds.push(blockedStudentId);
+    await assert.rejects(
+      AuthService.login(blockedStudentId, 'Inactive@2000'),
+      (error: any) => error.statusCode === 403
+    );
 
     const wrongCurrentPassword = await request('POST', '/api/auth/password', {
       currentPassword: 'incorrect',
