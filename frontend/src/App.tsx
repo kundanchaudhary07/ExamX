@@ -11,7 +11,13 @@ import {
   ExamAttemptRecord,
   ProctoringEventRecord
 } from './types';
-import { dbService } from './services/dbService';
+import {
+  dbService,
+  mapBackendExamToFrontend,
+  mapBackendQuestionToFrontend,
+  mapBackendQueryToFrontend,
+  mapBackendResultToFrontend
+} from './services/dbService';
 import { realtimeService } from './services/realtimeService';
 import { ProctoringHandle, ProctoringModule } from './components/ProctoringModule';
 import { StudentDashboard } from './components/dashboard/StudentDashboard';
@@ -90,6 +96,17 @@ export default function App() {
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [markedForReview, setMarkedForReview] = useState<Record<string, boolean>>({});
   const [proctorLogs, setProctorLogs] = useState<ProctorLog[]>([]);
+  const [warningCount, setWarningCount] = useState(0);
+  const [isAttemptSuspended, setIsAttemptSuspended] = useState(false);
+  const [isSuspensionModalOpen, setIsSuspensionModalOpen] = useState(false);
+  const [assistanceRequestStatus, setAssistanceRequestStatus] = useState<
+    'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED'
+  >('NONE');
+  const [assistanceRejectionReason, setAssistanceRejectionReason] = useState('');
+  const [facultyApprovalMessage, setFacultyApprovalMessage] = useState('');
+  const [cameraStatus, setCameraStatus] = useState<NonNullable<ExamAttemptRecord['cameraStatus']>>('UNKNOWN');
+  const [faceStatus, setFaceStatus] = useState<NonNullable<ExamAttemptRecord['faceStatus']>>('UNKNOWN');
+  const [fullscreenActive, setFullscreenActive] = useState(false);
   const [timeLeft, setTimeLeft] = useState(1800);
   const [isLoadingExam, setIsLoadingExam] = useState(false);
   const [examEngineError, setExamEngineError] = useState<string | null>(null);
@@ -112,10 +129,11 @@ export default function App() {
   const [screenshotWarningMessage, setScreenshotWarningMessage] = useState('');
   const [showLiveQueryModal, setShowLiveQueryModal] = useState(false);
   const [liveQueryMessage, setLiveQueryMessage] = useState('');
-  const [liveQueryReasonType, setLiveQueryReasonType] = useState<StudentQuery['reasonType']>('INCORRECT_QUESTION');
+  const [liveQueryReasonType, setLiveQueryReasonType] = useState<StudentQuery['reasonType']>('OUT_OF_SYLLABUS');
   const [isSubmittingLiveQuery, setIsSubmittingLiveQuery] = useState(false);
   const [liveQuerySuccess, setLiveQuerySuccess] = useState<string | null>(null);
   const proctoringRef = useRef<ProctoringHandle>(null);
+  const rejectedAttemptRef = useRef<string | null>(null);
 
   // Unblock review request state for terminated student
   const [showUnblockRequestModal, setShowUnblockRequestModal] = useState(false);
@@ -208,6 +226,16 @@ export default function App() {
     }
   }, []);
 
+  const updateResultState = useCallback((result: StudentResult) => {
+    setAllResults(previous => {
+      const index = previous.findIndex(item => item.resultId === result.resultId);
+      if (index < 0) return [result, ...previous];
+      const next = [...previous];
+      next[index] = result;
+      return next;
+    });
+  }, []);
+
   // Restore session on mount
   useEffect(() => {
     const restoreSession = async () => {
@@ -255,21 +283,243 @@ export default function App() {
         return;
       }
 
+      if (payload.event === 'result.published') {
+        const result = (payload.data as { result?: unknown } | undefined)?.result;
+        if (result) updateResultState(mapBackendResultToFrontend(result));
+        return;
+      }
+
+      if (payload.event === 'results.bulkPublished') {
+        const data = payload.data as {
+          resultIds?: string[];
+          publishedAt?: string;
+          publishedBy?: string;
+        } | undefined;
+        const publishedIds = new Set(data?.resultIds || []);
+        setAllResults(previous => previous.map(result =>
+          publishedIds.has(result.resultId)
+            ? {
+                ...result,
+                status: 'PUBLISHED',
+                isPublished: true,
+                publishedAt: data?.publishedAt || result.publishedAt,
+                publishedBy: data?.publishedBy || result.publishedBy
+              }
+            : result
+        ));
+        return;
+      }
+
+      if (payload.event.startsWith('exam.')) {
+        const exam = (payload.data as { exam?: unknown } | undefined)?.exam;
+        if (exam) {
+          const incoming = mapBackendExamToFrontend(exam);
+          setScheduledExams(previous => {
+            const index = previous.findIndex(item => item.examId === incoming.examId);
+            if (index < 0) return [incoming, ...previous];
+            const next = [...previous];
+            next[index] = incoming;
+            return next;
+          });
+        }
+        return;
+      }
+
+      if (payload.event === 'attempt.submitted') {
+        const resultId = (payload.data as { resultId?: string } | undefined)?.resultId;
+        if (resultId) {
+          void dbService.getResultById(resultId)
+            .then(updateResultState)
+            .catch(() => {
+              if (currentUser) void loadRoleData(currentUser);
+            });
+        }
+      }
+
+      if (payload.event.startsWith('question.')) {
+        const data = payload.data as { question?: unknown; questionId?: string } | undefined;
+        if (payload.event === 'question.deleted' && data?.questionId) {
+          setQuestionBank(previous => previous.filter(question =>
+            question.questionId !== data.questionId && question.id !== data.questionId
+          ));
+        } else if (data?.question) {
+          const question = mapBackendQuestionToFrontend(data.question);
+          setQuestionBank(previous => {
+            const index = previous.findIndex(item =>
+              (item.questionId || item.id) === (question.questionId || question.id)
+            );
+            if (index < 0) return [question, ...previous];
+            const next = [...previous];
+            next[index] = question;
+            return next;
+          });
+        }
+        return;
+      }
+
+      if (payload.event.startsWith('query.')) {
+        const query = (payload.data as { query?: unknown } | undefined)?.query;
+        if (query) {
+          const incoming = mapBackendQueryToFrontend(query);
+          setAllQueries(previous => {
+            const index = previous.findIndex(item => item.queryId === incoming.queryId);
+            if (index < 0) return [incoming, ...previous];
+            const next = [...previous];
+            next[index] = incoming;
+            return next;
+          });
+        }
+        return;
+      }
+
+      if (payload.event === 'result.created' || payload.event === 'result.updated') {
+        const result = (payload.data as { result?: unknown } | undefined)?.result;
+        if (result) updateResultState(mapBackendResultToFrontend(result));
+      }
       if (
-        payload.event.startsWith('exam.') ||
-        payload.event.startsWith('question.') ||
-        payload.event.startsWith('result.') ||
-        payload.event.startsWith('query.') ||
-        payload.event.startsWith('student.') ||
-        payload.event.startsWith('teacher.')
+        payload.event === 'attempt.suspended' &&
+        payload.data &&
+        (payload.data as { attemptId?: string }).attemptId === activeAttempt?.attemptId
       ) {
-        loadRoleData(currentUser);
+        setIsAttemptSuspended(true);
+        setIsSuspensionModalOpen(true);
+        setAssistanceRequestStatus('NONE');
+        setAssistanceRejectionReason('');
+        setFacultyApprovalMessage('');
+      }
+      if (
+        (payload.event === 'attempt.resumed' ||
+          payload.event === 'unblock.updated' ||
+          payload.event === 'attempt.submitted') &&
+        payload.data
+      ) {
+        const data = payload.data as {
+          attemptId?: string;
+          request?: { attemptId?: string; status?: string; remarks?: string };
+          attempt?: ExamAttemptRecord;
+          message?: string;
+        };
+        const requestAttemptId = data.attemptId || data.request?.attemptId;
+        if (requestAttemptId === activeAttempt?.attemptId) {
+          if (
+            payload.event === 'attempt.submitted' ||
+            data.request?.status === 'REJECTED'
+          ) {
+            if (rejectedAttemptRef.current === activeAttempt.attemptId) return;
+            rejectedAttemptRef.current = activeAttempt.attemptId;
+            setAssistanceRequestStatus('REJECTED');
+            setAssistanceRejectionReason(data.request?.remarks || '');
+            setFacultyApprovalMessage('');
+            setIsAttemptSuspended(false);
+            setIsSuspensionModalOpen(false);
+            setCameraStatus('OFFLINE');
+            proctoringRef.current?.stopMediaStream();
+            setLastSubmissionSummary({
+              attempt: activeAttempt,
+              resultPublished: false,
+              result: null,
+              message: data.message || 'Your assistance request was rejected. Your exam has been submitted.'
+            });
+            setView(ViewState.EXAM_RESULT);
+            if (document.fullscreenElement) {
+              void document.exitFullscreen().catch(() => undefined);
+            }
+            dbService.getAttemptById(activeAttempt.attemptId).then(attemptData => {
+              setActiveAttempt(attemptData.attempt);
+              setLastSubmissionSummary(current =>
+                current
+                  ? { ...current, attempt: attemptData.attempt }
+                  : current
+              );
+            }).catch((error: any) => {
+              setExamEngineError(error?.message || 'The submitted attempt could not be refreshed.');
+            });
+          } else if (data.request?.status === 'APPROVED' || payload.event === 'attempt.resumed') {
+            setAssistanceRequestStatus('APPROVED');
+            setFacultyApprovalMessage(data.message || 'Faculty has approved your request.');
+            setIsAttemptSuspended(false);
+            setIsSuspensionModalOpen(false);
+            dbService.getAttemptById(activeAttempt.attemptId).then(attemptData => {
+              setActiveAttempt(attemptData.attempt);
+              setTimeLeft(attemptData.remainingSeconds);
+              if (attemptData.exam) setActiveScheduledExam(attemptData.exam);
+            }).catch((error: any) => {
+              setExamEngineError(error?.message || 'Unable to refresh the resumed attempt.');
+            });
+          }
+        }
       }
     });
 
     const unsubStatus = realtimeService.subscribeStatus(status => {
       if (status.connected && status.reconnected) {
         loadRoleData(currentUser);
+        if (activeAttempt) {
+          dbService.getAttemptById(activeAttempt.attemptId).then(async data => {
+            setActiveAttempt(data.attempt);
+            setTimeLeft(data.remainingSeconds);
+            if (data.exam) setActiveScheduledExam(data.exam);
+            if (data.attempt.status !== 'IN_PROGRESS') {
+              proctoringRef.current?.stopMediaStream();
+              setCameraStatus('OFFLINE');
+              setIsAttemptSuspended(false);
+              setIsSuspensionModalOpen(false);
+              setIsTerminated(false);
+              setAssistanceRequestStatus('NONE');
+              setAssistanceRejectionReason('');
+              setLastSubmissionSummary({
+                attempt: data.attempt,
+                resultPublished: false,
+                result: null,
+                message: 'Your examination attempt was finalized while you were disconnected.'
+              });
+              setView(ViewState.EXAM_RESULT);
+              try {
+                const requests = await dbService.getUnblockRequests({
+                  examId: data.attempt.examId,
+                  studentId: data.attempt.studentId
+                });
+                const wasRejected = requests.some(
+                  request =>
+                    request.attemptId === data.attempt.attemptId &&
+                    request.status === 'REJECTED'
+                );
+                if (wasRejected) {
+                  setAssistanceRequestStatus('REJECTED');
+                  setLastSubmissionSummary(current =>
+                    current
+                      ? {
+                          ...current,
+                          message: 'Your assistance request was rejected. Your exam has been submitted.'
+                        }
+                      : current
+                  );
+                }
+              } catch (error: any) {
+                setExamEngineError(error?.message || 'Unable to load the assistance review decision.');
+              }
+              return;
+            }
+            setCurrentQIndex(data.attempt.currentQuestionIndex || 0);
+            setIsAttemptSuspended(Boolean(data.attempt.suspended));
+            setIsSuspensionModalOpen(Boolean(data.attempt.suspended));
+            const restoredAnswers: Record<string, number> = {};
+            const restoredReview: Record<string, boolean> = {};
+            const optionKeys: Array<'A' | 'B' | 'C' | 'D'> = ['A', 'B', 'C', 'D'];
+            data.attempt.answers.forEach(answer => {
+              if (answer.selectedOption) {
+                const index = optionKeys.indexOf(answer.selectedOption);
+                if (index >= 0) restoredAnswers[answer.questionId] = index;
+              }
+              if (answer.markedForReview) restoredReview[answer.questionId] = true;
+            });
+            setAnswers(restoredAnswers);
+            setMarkedForReview(restoredReview);
+            setWarningCount(data.attempt.warningCount || 0);
+          }).catch((error: any) => {
+            setExamEngineError(error?.message || 'Unable to restore the current examination state.');
+          });
+        }
       }
     });
 
@@ -277,7 +527,7 @@ export default function App() {
       unsubEvents();
       unsubStatus();
     };
-  }, [currentUser, loadRoleData]);
+  }, [currentUser, activeAttempt?.attemptId, loadRoleData, updateResultState]);
 
   // Toggle Dark Mode
   useEffect(() => {
@@ -363,7 +613,10 @@ export default function App() {
       status: newQ.status || 'ACTIVE'
     });
 
-    setQuestionBank((prev) => [saved, ...prev]);
+    setQuestionBank(previous => [
+      saved,
+      ...previous.filter(item => (item.questionId || item.id) !== (saved.questionId || saved.id))
+    ]);
   };
 
   const handleUpdateQuestion = async (updatedQ: Question) => {
@@ -402,13 +655,23 @@ export default function App() {
   };
 
   const handlePublishResult = async (resultId: string) => {
-    await dbService.publishSingleResult(resultId, 'PUBLISHED');
-    if (currentUser) await loadRoleData(currentUser);
+    const result = await dbService.publishSingleResult(resultId, 'PUBLISHED');
+    updateResultState(result);
   };
 
-  const handlePublishExamResults = async (examId: string) => {
-    await dbService.publishExamResults(examId);
-    if (currentUser) await loadRoleData(currentUser);
+  const handleUpdateExamStatus = async (
+    examId: string,
+    status: Parameters<typeof dbService.updateExamStatus>[1],
+    publishResults = false
+  ) => {
+    const exam = await dbService.updateExamStatus(examId, status, publishResults);
+    setScheduledExams(previous => {
+      const index = previous.findIndex(item => item.examId === examId);
+      if (index < 0) return [exam, ...previous];
+      const next = [...previous];
+      next[index] = exam;
+      return next;
+    });
   };
 
   const handleRaiseQuery = async (
@@ -417,13 +680,13 @@ export default function App() {
     examId?: string,
     resultId?: string
   ) => {
-    await dbService.createQuery({
+    const query = await dbService.createQuery({
       examId: examId || '',
       resultId,
       questionText: topic,
       message: question
     });
-    if (currentUser) await loadRoleData(currentUser);
+    setAllQueries(previous => [query, ...previous.filter(item => item.queryId !== query.queryId)]);
   };
 
   const handleResolveQuery = async (
@@ -431,11 +694,24 @@ export default function App() {
     response: string,
     status: 'RESOLVED' | 'REJECTED' = 'RESOLVED'
   ) => {
-    await dbService.resolveQuery(queryId, {
-      status,
-      response
+    const query = await dbService.resolveQuery(queryId, {
+      resolutionType: status === 'RESOLVED' ? 'EXCLUDE_QUESTION' : 'VALID_QUESTION',
+      resolutionNotes: response
     });
-    if (currentUser) await loadRoleData(currentUser);
+    setAllQueries(previous => previous.map(item => item.queryId === query.queryId ? query : item));
+  };
+
+  const handleResolveQueryDetailed = async (
+    queryId: string,
+    payload: {
+      resolutionType: NonNullable<StudentQuery['resolutionType']>;
+      resolutionNotes: string;
+      scoreAdjustment?: number;
+      correctedAnswer?: string;
+    }
+  ) => {
+    const query = await dbService.resolveQuery(queryId, payload);
+    setAllQueries(previous => previous.map(item => item.queryId === query.queryId ? query : item));
   };
 
   const handleSaveExam = async (exam: ScheduledExam) => {
@@ -443,7 +719,7 @@ export default function App() {
     const endIso = `${exam.scheduledDate}T${exam.endTime || '23:00'}:00`;
 
     if (exam.examId) {
-      await dbService.updateExam(exam.examId, {
+      const saved = await dbService.updateExam(exam.examId, {
         title: exam.title,
         description: exam.description,
         subject: exam.subject,
@@ -462,8 +738,11 @@ export default function App() {
         assignedStudentIds: exam.assignedStudentIds || [],
         status: exam.status
       });
+      setScheduledExams(previous => previous.map(item =>
+        (item.examId || item.id) === (saved.examId || saved.id) ? saved : item
+      ));
     } else {
-      await dbService.createExam({
+      const saved = await dbService.createExam({
         title: exam.title,
         description: exam.description,
         subject: exam.subject,
@@ -482,14 +761,18 @@ export default function App() {
         assignedStudentIds: exam.assignedStudentIds || [],
         status: exam.status || 'DRAFT'
       });
+      setScheduledExams(previous => [
+        saved,
+        ...previous.filter(item => (item.examId || item.id) !== (saved.examId || saved.id))
+      ]);
     }
-
-    if (currentUser) await loadRoleData(currentUser);
   };
 
   const handleDeleteExam = async (id: string) => {
-    await dbService.updateExamStatus(id, 'ARCHIVED');
-    if (currentUser) await loadRoleData(currentUser);
+    const archivedExam = await dbService.updateExamStatus(id, 'ARCHIVED');
+    setScheduledExams(previous => previous.map(item =>
+      (item.examId || item.id) === (archivedExam.examId || archivedExam.id) ? archivedExam : item
+    ));
   };
 
   // --- STUDENT EXAM FLOW ---
@@ -505,17 +788,22 @@ export default function App() {
   const buildBackendAnswersPayload = useCallback(
     (ansMap: Record<string, number>, reviewMap: Record<string, boolean>) => {
       const optionKeys: Array<'A' | 'B' | 'C' | 'D'> = ['A', 'B', 'C', 'D'];
-      return Object.entries(ansMap).map(([questionId, optIndex]) => ({
-        questionId,
-        selectedOption: optionKeys[optIndex] || null,
-        markedForReview: Boolean(reviewMap[questionId])
-      }));
+    const questionIds = new Set([...Object.keys(ansMap), ...Object.keys(reviewMap)]);
+    return Array.from(questionIds).map(questionId => ({
+      questionId,
+      selectedOption: optionKeys[ansMap[questionId]] || null,
+      markedForReview: Boolean(reviewMap[questionId])
+    }));
     },
     []
   );
 
   const handleConfirmStartExam = async () => {
     if (!activeScheduledExam) return;
+    const fullscreenRequest =
+      document.fullscreenElement || !document.documentElement.requestFullscreen
+        ? Promise.resolve()
+        : document.documentElement.requestFullscreen().catch(() => undefined);
     setIsLoadingExam(true);
     setExamEngineError(null);
 
@@ -523,11 +811,13 @@ export default function App() {
       const startData = await dbService.startExamAttempt(
         activeScheduledExam.examId || activeScheduledExam.id
       );
+      await fullscreenRequest;
 
       setActiveAttempt(startData.attempt);
+      rejectedAttemptRef.current = null;
       setActiveScheduledExam(startData.exam);
       setExamQuestions(startData.questions);
-      setTimeLeft(startData.remainingSeconds || startData.exam.durationMinutes * 60);
+      setTimeLeft(startData.remainingSeconds);
 
       // Restore any saved answers if resumed
       const restoredAnswers: Record<string, number> = {};
@@ -547,7 +837,41 @@ export default function App() {
       setAnswers(restoredAnswers);
       setMarkedForReview(restoredReview);
       setCurrentQIndex(startData.attempt.currentQuestionIndex || 0);
-      setProctorLogs([]);
+      setWarningCount(startData.attempt.warningCount || 0);
+      setCameraStatus(startData.attempt.cameraStatus || 'UNKNOWN');
+      setFaceStatus(startData.attempt.faceStatus || 'UNKNOWN');
+      setFullscreenActive(Boolean(startData.attempt.fullscreenActive));
+      setIsAttemptSuspended(Boolean(startData.attempt.suspended));
+      setIsSuspensionModalOpen(Boolean(startData.attempt.suspended));
+      setFacultyApprovalMessage('');
+      setAssistanceRequestStatus('NONE');
+      setAssistanceRejectionReason('');
+      const persistedEvents = await dbService.getProctoringEvents({
+        attemptId: startData.attempt.attemptId
+      });
+      setProctorLogs(
+        persistedEvents
+          .filter(event => !['SCREENSHOT_ATTEMPT', 'CAMERA_CONNECTED', 'FACE_DETECTED', 'FACE_STATUS', 'WINDOW_FOCUS'].includes(event.eventType))
+          .map(event => ({
+            id: event.eventId,
+            timestamp: new Date(event.timestamp).toLocaleTimeString(),
+            type: event.severity === 'CRITICAL' || event.severity === 'HIGH' ? 'CRITICAL' : 'WARNING',
+            message: event.details
+          }))
+      );
+      if (startData.attempt.suspended) {
+        const requests = await dbService.getUnblockRequests({
+          examId: startData.attempt.examId,
+          studentId: startData.attempt.studentId
+        });
+        const latestRequest = requests.find(request => request.attemptId === startData.attempt.attemptId);
+        setAssistanceRequestStatus(
+          latestRequest?.status === 'APPROVED' ? 'NONE' : latestRequest?.status || 'NONE'
+        );
+        setAssistanceRejectionReason(
+          latestRequest?.status === 'REJECTED' ? latestRequest.remarks || '' : ''
+        );
+      }
       setIsTerminated(false);
       setTerminationReason('');
       setLastSubmissionSummary(null);
@@ -557,6 +881,9 @@ export default function App() {
       setUnblockReason('');
       setView(ViewState.EXAM_ACTIVE);
     } catch (err: any) {
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => undefined);
+      }
       setExamEngineError(err?.message || 'Unable to start examination attempt.');
     } finally {
       setIsLoadingExam(false);
@@ -572,6 +899,7 @@ export default function App() {
       ...answers,
       [qId]: optionIndex
     };
+
     setAnswers(updatedAnswers);
 
     if (activeAttempt) {
@@ -579,12 +907,19 @@ export default function App() {
         await dbService.saveAttemptAnswers(activeAttempt.attemptId, {
           answers: buildBackendAnswersPayload(updatedAnswers, markedForReview),
           currentQuestionIndex: currentQIndex,
-          warningCount: proctorLogs.length
+          warningCount
         });
       } catch {
         // Non-blocking background save
       }
     }
+  };
+
+  const handleNextQuestion = () => {
+    if (!document.fullscreenElement) {
+      void proctoringRef.current?.requestFullscreen();
+    }
+    setCurrentQIndex(previous => previous + 1);
   };
 
   const toggleMarkForReview = () => {
@@ -625,7 +960,7 @@ export default function App() {
       try {
         const submitRes = await dbService.submitExamAttempt(activeAttempt.attemptId, {
           answers: buildBackendAnswersPayload(answers, markedForReview),
-          warningCount: proctorLogs.length,
+          warningCount,
           terminatedByProctor: terminated,
           terminationReason: reason
         });
@@ -637,16 +972,13 @@ export default function App() {
           result: submitRes.result,
           message: submitRes.message
         });
+        if (submitRes.result) updateResultState(submitRes.result);
         setView(ViewState.EXAM_RESULT);
-
-        if (currentUser) {
-          await loadRoleData(currentUser);
-        }
       } catch (err: any) {
         setExamEngineError(err?.message || 'Failed to submit examination attempt');
       }
     },
-    [activeAttempt, answers, markedForReview, proctorLogs.length, buildBackendAnswersPayload, currentUser, loadRoleData]
+    [activeAttempt, answers, markedForReview, warningCount, buildBackendAnswersPayload, updateResultState]
   );
 
   // Exam Countdown Timer
@@ -657,7 +989,9 @@ export default function App() {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          finishExam(false, 'Server examination timer expired');
+          if (!isAttemptSuspended) {
+            finishExam(false, 'Server examination timer expired');
+          }
           return 0;
         }
         return prev - 1;
@@ -665,26 +999,81 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [view, finishExam]);
+  }, [view, finishExam, isAttemptSuspended]);
+
+  useEffect(() => {
+    if (view !== ViewState.EXAM_ACTIVE || !activeAttempt || isAttemptSuspended) return;
+    const timeout = setTimeout(() => {
+      dbService
+        .saveAttemptAnswers(activeAttempt.attemptId, {
+          answers: buildBackendAnswersPayload(answers, markedForReview),
+          currentQuestionIndex: currentQIndex,
+          cameraStatus,
+          faceStatus,
+          fullscreenActive
+        })
+        .catch((err: any) => {
+          if (err?.status !== 423) {
+            setExamEngineError(err?.message || 'Unable to save examination progress.');
+          }
+        });
+    }, 350);
+    return () => clearTimeout(timeout);
+  }, [
+    view,
+    activeAttempt,
+    isAttemptSuspended,
+    answers,
+    markedForReview,
+    currentQIndex,
+    cameraStatus,
+    faceStatus,
+    fullscreenActive,
+    buildBackendAnswersPayload
+  ]);
+
+  useEffect(() => {
+    if (view !== ViewState.EXAM_ACTIVE || !activeAttempt) return;
+    const heartbeat = setInterval(() => {
+      dbService.heartbeatAttempt(activeAttempt.attemptId, {
+        cameraStatus,
+        faceStatus,
+        fullscreenActive
+      }).then(result => {
+        setTimeLeft(result.remainingSeconds);
+        if (result.attempt.suspended) setIsAttemptSuspended(true);
+        if (result.attempt.status !== 'IN_PROGRESS') {
+          proctoringRef.current?.stopMediaStream();
+          setIsAttemptSuspended(false);
+          setLastSubmissionSummary({
+            attempt: result.attempt,
+            resultPublished: result.result?.status === 'PUBLISHED',
+            result: result.result || null,
+            message: 'The server-authoritative examination timer has expired.'
+          });
+          setView(ViewState.EXAM_RESULT);
+        }
+      }).catch((error: any) => {
+        setExamEngineError(error?.message || 'Examination connection heartbeat failed.');
+      });
+    }, 15000);
+    return () => clearInterval(heartbeat);
+  }, [view, activeAttempt?.attemptId, cameraStatus, faceStatus, fullscreenActive]);
 
   const handleProctorViolation = (log: ProctorLog) => {
-    setProctorLogs((prev) => {
-      const newLogs = [log, ...prev];
-      const maxWarnings = 5;
-
-      if (newLogs.length > maxWarnings && !isTerminated) {
-        setIsTerminated(true);
-        setActiveWarningPopup(null);
-        const reason = `Exceeded maximum security warnings (${maxWarnings}). Last violation: ${log.message}`;
-        setTerminationReason(reason);
-        setTimeout(() => {
-          finishExam(true, reason);
-        }, 500);
-      } else if (newLogs.length <= maxWarnings && !isTerminated) {
-        setActiveWarningPopup({ log, count: newLogs.length });
-      }
-      return newLogs;
-    });
+    const nextWarningCount = Math.min(5, warningCount + 1);
+    setProctorLogs(previous => [log, ...previous]);
+    setWarningCount(nextWarningCount);
+    if (nextWarningCount >= 5) {
+      setActiveWarningPopup(null);
+      setIsAttemptSuspended(true);
+      setIsSuspensionModalOpen(true);
+      setAssistanceRequestStatus('NONE');
+      setAssistanceRejectionReason('');
+      setFacultyApprovalMessage('');
+    } else if (!isTerminated) {
+      setActiveWarningPopup({ log, count: nextWarningCount });
+    }
   };
 
   const handleProctoringEvent = async (
@@ -699,7 +1088,13 @@ export default function App() {
         attemptId: activeAttempt.attemptId,
         eventType,
         severity,
-        details
+        details,
+        metadata: {
+          attemptState: {
+            answers: buildBackendAnswersPayload(answers, markedForReview),
+            currentQuestionIndex: currentQIndex
+          }
+        }
       });
     } catch {
       // Non-blocking event persistence
@@ -843,8 +1238,8 @@ export default function App() {
             onUpdateQuestion={handleUpdateQuestion}
             onDeleteQuestion={handleDeleteQuestion}
             onPublishResult={handlePublishResult}
-            onPublishAllForExam={handlePublishExamResults}
-            onResolveQuery={handleResolveQuery}
+            onStatusChange={handleUpdateExamStatus}
+            onResolveQueryDetailed={handleResolveQueryDetailed}
             onSaveExam={handleSaveExam}
             onDeleteExam={handleDeleteExam}
             onRefreshData={() => loadRoleData(currentUser)}
@@ -862,7 +1257,7 @@ export default function App() {
             onSaveExam={handleSaveExam}
             onDeleteExam={handleDeleteExam}
             onPublishResult={handlePublishResult}
-            onPublishAllForExam={handlePublishExamResults}
+            onStatusChange={handleUpdateExamStatus}
             onResolveQuery={handleResolveQuery}
             onRefreshGlobalData={() => loadRoleData(currentUser)}
           />
@@ -951,7 +1346,29 @@ export default function App() {
         {/* EXAM ACTIVE */}
         {view === ViewState.EXAM_ACTIVE && examQuestions.length > 0 && (
           <div className="flex-1 bg-slate-100 dark:bg-slate-950 p-4 lg:p-6 w-full">
-            <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+           {facultyApprovalMessage && !isAttemptSuspended && (
+             <div role="status" className="mx-auto mb-4 flex max-w-7xl items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-[14px] font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
+               <CheckCircle className="h-4 w-4 shrink-0" />
+               <span>{facultyApprovalMessage}</span>
+             </div>
+           )}
+           {isAttemptSuspended && !isSuspensionModalOpen && (
+             <div role="status" className="mx-auto mb-4 flex max-w-7xl flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-900 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+               <span>Examination suspended. Your answers and server timer are preserved.</span>
+               <button
+                 type="button"
+                 onClick={() => setIsSuspensionModalOpen(true)}
+                 className="rounded-md px-3 py-1.5 font-semibold text-amber-900 underline decoration-amber-500 underline-offset-2 hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600 dark:text-amber-100 dark:hover:bg-amber-900/60"
+               >
+                 View assistance status
+               </button>
+             </div>
+           )}
+           <div
+             inert={isAttemptSuspended}
+             aria-disabled={isAttemptSuspended}
+             className={`max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6 items-start ${isAttemptSuspended ? 'pointer-events-none select-none opacity-60' : ''}`}
+           >
               {examEngineError && (
                 <div className="lg:col-span-4 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-[14px] font-medium text-red-600 dark:text-red-400">
                   {examEngineError}
@@ -1096,7 +1513,7 @@ export default function App() {
                         title="Submit an official question inquiry to faculty proctor"
                       >
                         <HelpCircle className="w-3.5 h-3.5 mr-1.5" />
-                        Raise Query
+                        Report Question
                       </button>
                     </div>
 
@@ -1111,7 +1528,7 @@ export default function App() {
 
                       {currentQIndex < examQuestions.length - 1 ? (
                         <button
-                          onClick={() => setCurrentQIndex((prev) => prev + 1)}
+                          onClick={handleNextQuestion}
                           className="h-9.5 px-5 bg-blue-600 text-white rounded-xl font-medium text-[13px] hover:bg-blue-700 inline-flex items-center transition-all"
                         >
                           Next <ChevronRight className="w-3.5 h-3.5 ml-1" />
@@ -1152,11 +1569,16 @@ export default function App() {
                 <ProctoringModule
                   ref={proctoringRef}
                   isExamActive={view === ViewState.EXAM_ACTIVE}
-                  warningCount={proctorLogs.length}
+                  warningCount={warningCount}
                   maxWarnings={5}
                   onViolation={handleProctorViolation}
                   onProctoringEvent={handleProctoringEvent}
                   onScreenshotDetected={handleScreenshotDetected}
+                  onMonitoringUpdate={update => {
+                    setCameraStatus(update.cameraStatus);
+                    setFaceStatus(update.faceStatus);
+                    setFullscreenActive(update.fullscreenActive);
+                  }}
                 />
 
                 {/* Question Palette */}
@@ -1447,7 +1869,7 @@ export default function App() {
               Screen captures, screenshot shortcuts, and browser printing are strictly restricted during live examinations to protect test integrity.
             </p>
             <p className="text-[12px] text-slate-400 dark:text-slate-500 bg-slate-50 dark:bg-slate-900/60 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800">
-              Note: This notice is security feedback only. It does <span className="font-semibold text-slate-600 dark:text-slate-300">not</span> increment your proctoring violation warnings ({proctorLogs.length} / 5).
+              Note: This notice is security feedback only. It does <span className="font-semibold text-slate-600 dark:text-slate-300">not</span> increment your proctoring violation warnings ({warningCount} / 5).
             </p>
           </div>
         </Modal>
@@ -1459,7 +1881,7 @@ export default function App() {
           isOpen={showLiveQueryModal}
           onClose={() => setShowLiveQueryModal(false)}
           size="compact"
-          title={`Raise Query · Question #${currentQIndex + 1}`}
+          title={`Report Question · Question #${currentQIndex + 1}`}
           subtitle={examQuestions[currentQIndex]?.topic || activeScheduledExam?.title}
           footer={
             <div className="flex items-center justify-end gap-3 w-full">
@@ -1478,6 +1900,15 @@ export default function App() {
                   if (!currentQ || !activeScheduledExam) return;
                   setIsSubmittingLiveQuery(true);
                   try {
+                    if (activeAttempt) {
+                      await dbService.saveAttemptAnswers(activeAttempt.attemptId, {
+                        answers: buildBackendAnswersPayload(answers, markedForReview),
+                        currentQuestionIndex: currentQIndex,
+                        cameraStatus,
+                        faceStatus,
+                        fullscreenActive
+                      });
+                    }
                     await dbService.createQuery({
                       examId: activeScheduledExam.examId || activeScheduledExam.id,
                       attemptId: activeAttempt?.attemptId,
@@ -1486,7 +1917,7 @@ export default function App() {
                       reasonType: liveQueryReasonType,
                       message: liveQueryMessage.trim()
                     });
-                    setLiveQuerySuccess('Your query has been dispatched to the faculty proctor.');
+                    setLiveQuerySuccess('Your question report has been sent to the assigned faculty.');
                     setTimeout(() => {
                       setShowLiveQueryModal(false);
                       setLiveQuerySuccess(null);
@@ -1530,13 +1961,17 @@ export default function App() {
                   </label>
                   <select
                     value={liveQueryReasonType}
-                    onChange={e => setLiveQueryReasonType(e.target.value as any)}
+                    onChange={e => setLiveQueryReasonType(e.target.value as StudentQuery['reasonType'])}
                     className="w-full h-11 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-[14px] text-slate-800 dark:text-slate-200 outline-none"
                   >
-                    <option value="INCORRECT_QUESTION">Ambiguous / Incorrect Question</option>
-                    <option value="TYPO_ERROR">Typographical / Formatting Error</option>
-                    <option value="TECHNICAL_ISSUE">Technical / Display Issue</option>
-                    <option value="OTHER">Other Clarification</option>
+                    <option value="OUT_OF_SYLLABUS">Out of syllabus</option>
+                    <option value="INCORRECT_QUESTION">Incorrect question</option>
+                    <option value="TYPO_ERROR">Typo/error</option>
+                    <option value="INCORRECT_OPTIONS">Incorrect options</option>
+                    <option value="MULTIPLE_OPTIONS_CORRECT">Multiple options appear correct</option>
+                    <option value="QUESTION_UNCLEAR">Question unclear</option>
+                    <option value="TECHNICAL_ISSUE">Technical issue</option>
+                    <option value="OTHER">Other</option>
                   </select>
                 </div>
 
@@ -1557,6 +1992,122 @@ export default function App() {
             )}
           </div>
         </Modal>
+      )}
+
+      {view === ViewState.EXAM_ACTIVE && isAttemptSuspended && isSuspensionModalOpen && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/70 p-4">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="faculty-assistance-title"
+            className="relative w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+          >
+            <button
+              type="button"
+              aria-label="Close suspension details"
+              onClick={() => setIsSuspensionModalOpen(false)}
+              className="absolute right-3 top-3 inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                <Shield className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 id="faculty-assistance-title" className="text-[18px] font-semibold text-slate-900 dark:text-white">
+                  Examination Suspended
+                </h2>
+                <p className="text-[13px] text-slate-500 dark:text-slate-400">
+                  The attempt, answers, flags, and server timer are preserved.
+                </p>
+              </div>
+            </div>
+            {facultyApprovalMessage && (
+              <p role="status" className="mb-4 rounded-lg bg-emerald-50 p-3 text-[14px] font-medium text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
+                {facultyApprovalMessage}
+              </p>
+            )}
+            {assistanceRequestStatus === 'PENDING' && (
+              <p className="mb-4 rounded-lg bg-blue-50 p-3 text-[14px] text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">
+                <span className="block font-semibold">Assistance Requested</span>
+                Your request is with the assigned faculty. This examination remains paused.
+              </p>
+            )}
+            {assistanceRequestStatus === 'REJECTED' && (
+              <p className="mb-4 rounded-lg bg-rose-50 p-3 text-[14px] text-rose-800 dark:bg-rose-900/30 dark:text-rose-300">
+                <span className="block font-semibold">Faculty assistance request was declined.</span>
+                {assistanceRejectionReason && (
+                  <span className="mt-1 block">Reason: {assistanceRejectionReason}</span>
+                )}
+              </p>
+            )}
+            <dl className="mb-5 grid grid-cols-2 gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3.5 text-[13px] dark:border-slate-700 dark:bg-slate-950/50">
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Answers saved</dt>
+                <dd className="mt-0.5 font-semibold tabular-nums text-slate-900 dark:text-white">
+                  {Object.keys(answers).length}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Questions flagged</dt>
+                <dd className="mt-0.5 font-semibold tabular-nums text-slate-900 dark:text-white">
+                  {Object.values(markedForReview).filter(Boolean).length}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Current question</dt>
+                <dd className="mt-0.5 font-semibold tabular-nums text-slate-900 dark:text-white">
+                  {examQuestions.length ? `${Math.min(currentQIndex + 1, examQuestions.length)} of ${examQuestions.length}` : 'Loading'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Server timer</dt>
+                <dd className="mt-0.5 font-semibold tabular-nums text-slate-900 dark:text-white">
+                  {formatTime(timeLeft)}
+                </dd>
+              </div>
+            </dl>
+            <div className="flex justify-end">
+              {assistanceRequestStatus === 'APPROVED' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAttemptSuspended(false);
+                    setFacultyApprovalMessage('');
+                  }}
+                  className="h-10 rounded-lg bg-blue-600 px-5 text-[14px] font-medium text-white hover:bg-blue-700"
+                >
+                  Resume Examination
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isSubmittingUnblock || assistanceRequestStatus === 'PENDING' || !activeAttempt || !activeScheduledExam}
+                  onClick={async () => {
+                    if (!activeAttempt || !activeScheduledExam) return;
+                    setIsSubmittingUnblock(true);
+                    try {
+                      await dbService.requestUnblock(
+                        activeAttempt.attemptId,
+                        activeScheduledExam.examId || activeScheduledExam.id,
+                        'Suspended after reaching five proctoring warnings. Requesting faculty assistance.'
+                      );
+                      setAssistanceRequestStatus('PENDING');
+                    } catch (err: any) {
+                      setExamEngineError(err?.message || 'Unable to submit the faculty assistance request.');
+                    } finally {
+                      setIsSubmittingUnblock(false);
+                    }
+                  }}
+                  className="h-10 rounded-lg bg-blue-600 px-5 text-[14px] font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isSubmittingUnblock ? 'Requesting...' : 'Request Faculty Assistance'}
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
       )}
 
       {/* 22. UNBLOCK / REVIEW REQUEST MODAL */}

@@ -9,6 +9,7 @@ export interface IUnblockRequestDocument extends Document {
   examTitle: string;
   studentId: string;
   studentName: string;
+  assignedFacultyId: string;
   reason: string;
   status: UnblockStatus;
   warningCount: number;
@@ -57,6 +58,12 @@ const UnblockRequestSchema = new Schema<IUnblockRequestDocument>(
       default: '',
       trim: true
     },
+    assignedFacultyId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true
+    },
     reason: {
       type: String,
       required: true,
@@ -70,7 +77,7 @@ const UnblockRequestSchema = new Schema<IUnblockRequestDocument>(
     },
     warningCount: {
       type: Number,
-      default: 6
+      default: 5
     },
     reviewedBy: {
       type: String,

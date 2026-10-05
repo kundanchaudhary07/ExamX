@@ -49,10 +49,12 @@ Returns backend service status and MongoDB database connectivity.
 
 ## 5. AI Question Generation (`/api/ai`)
 
-- `GET /api/ai/status` (`TEACHER`, `ADMIN`): Reports the selected backend provider/model and whether generation is configured, ready, or pending review.
-- `POST /api/ai/questions/generate` (`TEACHER`, `ADMIN`): Generates 1–200 validated, syllabus-grounded MCQ drafts using the backend provider selected by `AI_PROVIDER` (`GEMINI` or `GROQ`). Each successful request creates a persisted generation batch and associates its questions with that batch. Drafts remain pending until their owning teacher approves them; provider failures do not trigger cross-provider fallback.
+- `GET /api/ai/status` (`TEACHER`, `ADMIN`): Reports the Groq model and whether generation is configured, ready, or pending review.
+- `POST /api/ai/syllabus/upload` (`TEACHER`, `ADMIN`): Extracts and validates the uploaded syllabus against the selected subject before persisting it. The response includes the unit headings discovered in the extracted document.
+- `POST /api/ai/questions/generate` (`TEACHER`, `ADMIN`): Generates 1–200 validated, syllabus-grounded MCQ drafts using the backend-only Groq provider. `selectedUnits` may contain one or more exact unit headings returned by syllabus upload; generation is restricted to those unit sections. If omitted or empty, generation uses all syllabus content. Each successful request creates a persisted generation batch including the unit selection and associates its questions with that batch. Drafts remain pending until their owning teacher approves them.
 - `GET /api/ai/generation-batches` (`TEACHER`, `ADMIN`): Lists batch metadata and live review counts. Teachers see only their own batches; admins see all batches. Historical runs are included only when a generation audit matches the exact teacher, syllabus, time window, and generated count; ambiguous records are not grouped.
 - `GET /api/ai/generation-batches/:generationId/questions` (`TEACHER`, `ADMIN`): Lists questions associated with a batch, subject to teacher ownership. For a verified historical run, the response supplies a virtual generation ID without modifying stored question records.
+- Approved questions from a listed generation batch can be selected in exam creation as a reusable set. Existing question records are reused; exam creation validates their subject and any declared course/semester context before attachment.
 - `GET /api/subjects` (`TEACHER`, `ADMIN`): Lists normalized subject suggestions from registered subjects and existing ExamX records.
 - `POST /api/subjects` (`TEACHER`, `ADMIN`): Registers or returns a whitespace/case-normalized subject name.
 
@@ -77,10 +79,13 @@ Returns backend service status and MongoDB database connectivity.
 
 ## 7. Exam Attempts (`/api/attempts` & `/api/exams/:examId/attempts`)
 
-- `POST /api/exams/:examId/attempts` (also `/api/student/exams/:examId/start`) (`STUDENT`): Starts or resumes an exam attempt, enforcing assignment, schedule window, and `attemptLimit`. Returns sanitized questions (without `correctOption` or `explanation`) and server-calculated `remainingSeconds`.
-- `GET /api/attempts/:attemptId` (`STUDENT`, `TEACHER`, `ADMIN`): Retrieves attempt status and remaining time.
-- `PATCH /api/attempts/:attemptId/answers` (`STUDENT`): Validates and saves student answers during an active attempt; auto-expires attempt if server timer has elapsed.
+- `POST /api/exams/:examId/attempts` (also `/api/student/exams/:examId/start` and `/api/attempts/start`) (`STUDENT`): Starts or resumes an exam attempt, enforcing assignment, schedule window, and `attemptLimit`. Requires the authenticated browser's `X-ExamX-Device-Session` UUID. A partial unique index and server-side ownership checks enforce one in-progress attempt per student; a different device receives a conflict identifying the existing attempt rather than creating another. Returns sanitized questions (without `correctOption` or `explanation`) and server-calculated `remainingSeconds`.
+- `GET /api/attempts/:attemptId` (`STUDENT`, `TEACHER`, `ADMIN`): Retrieves attempt status and remaining time. Student responses also include sanitized exam metadata and questions so suspended or resumed attempts can restore the same exam context without exposing answer keys.
+- `GET /api/attempts/my` (`STUDENT`): Lists the authenticated student's attempts.
+- `PATCH /api/attempts/:attemptId/answers` and `POST /api/attempts/:attemptId/save` (`STUDENT`): Saves validated answers and monitoring checkpoint (current question, camera, face, and fullscreen state) during an active attempt; auto-expires the attempt if server time has elapsed.
+- `POST /api/attempts/:attemptId/heartbeat` (`STUDENT`): Persists the latest connection and monitoring heartbeat and returns server-authoritative remaining time.
 - `POST /api/attempts/:attemptId/submit` (`STUDENT`): Submits an active attempt, performs authoritative server-side scoring, and creates an unpublished `Result` record.
+- The fifth proctoring warning suspends, but does not terminate, an in-progress attempt. Its timer, answers, flags, reported questions, warning history, and current question remain attached to the same attempt; an approved faculty assistance request resumes that attempt.
 
 ---
 
@@ -98,16 +103,22 @@ Returns backend service status and MongoDB database connectivity.
 
 ## 9. Proctoring Events (`/api/proctoring`)
 
-- `POST /api/proctoring/events` (`STUDENT`): Records a real browser proctoring event (`TAB_SWITCH`, `WINDOW_BLUR`, `FULLSCREEN_EXIT`, `CAMERA_BLOCKED`, etc.) for the student's active attempt and updates attempt integrity metrics.
+- `POST /api/proctoring/events` (`STUDENT`): Records a real browser proctoring event (`TAB_SWITCH`, `WINDOW_BLUR`, `FULLSCREEN_EXIT`, `CAMERA_BLOCKED`, face events, etc.) for the student's active attempt and updates attempt integrity metrics. The fifth warning suspends the attempt pending faculty review.
 - `GET /api/proctoring/events` (`TEACHER`, `ADMIN`): Lists proctoring events for supervised exams (`TEACHER`) or all exams (`ADMIN`).
+- `POST /api/proctoring/unblock-requests` (`STUDENT`): Creates an assistance request for the authenticated student's suspended attempt; student, exam, attempt, and assigned faculty are validated by the backend.
+- `GET /api/proctoring/unblock-requests` (`STUDENT`, `TEACHER`, `ADMIN`): Lists only the caller's own request, requests assigned to the faculty member, or all requests for an administrator.
+- `PATCH /api/proctoring/unblock-requests/:requestId` (`TEACHER`, `ADMIN`): Audits an `APPROVED` or `REJECTED` decision. Approval resumes the existing, unexpired attempt without resetting its checkpoint. Rejection submits and evaluates the stored answers on that same attempt and emits a realtime submission update.
 
 ---
 
 ## 10. Student Queries (`/api/queries`)
 
-- `POST /api/queries` (`STUDENT`): Creates a query linked to the authenticated student.
-- `GET /api/queries` (`STUDENT`, `TEACHER`, `ADMIN`): Lists queries scoped by role ownership.
-- `PATCH /api/queries/:queryId` (`TEACHER`, `ADMIN`): Resolves or rejects a student query with faculty response.
+- `POST /api/queries` (`STUDENT`): Creates a question report. The backend derives student, exam, attempt, question text and options, selected answer, question number, and assigned faculty; the student supplies the issue category and description.
+- `GET /api/queries` (`STUDENT`, `TEACHER`, `ADMIN`): Lists only the student's own queries, queries assigned to the faculty member, or all queries for an administrator.
+- `PATCH /api/queries/:queryId/resolve` (`TEACHER`, `ADMIN`): Resolves a query with one of `VALID_QUESTION`, `OUT_OF_SYLLABUS`, `INVALID_QUESTION`, `CORRECT_ANSWER_CHANGED`, `GRACE_MARKS`, or `EXCLUDE_QUESTION`, plus resolution notes. Answer corrections, grace marks, and exclusions update the existing `Result`/evaluation flow; each resolution is audited.
+- `PATCH /api/queries/:queryId` (`TEACHER`, `ADMIN`): Backward-compatible query resolution endpoint.
+
+The existing Socket.IO connection emits role-scoped updates including `query.created`, `query.updated`, `query.resolved`, `unblock.created`, `unblock.updated`, `attempt.suspended`, `attempt.resumed`, `monitoring.updated`, `proctoring.event`, and `result.updated`. Dashboards reload authoritative backend state after reconnect.
 
 ---
 

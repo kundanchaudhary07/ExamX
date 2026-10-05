@@ -4,6 +4,12 @@ import { AiGenerationBatch, Question } from '../../types';
 import { dbService } from '../../services/dbService';
 import { Modal, StatusBadge } from '../common/SharedUI';
 
+function localDateKey(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 interface AiGenerationBatchCardsProps {
   batches: AiGenerationBatch[];
   search?: string;
@@ -40,12 +46,23 @@ export const AiGenerationBatchCards: React.FC<AiGenerationBatchCardsProps> = ({
   const [courseFilter, setCourseFilter] = useState('ALL');
   const [semesterFilter, setSemesterFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [difficultyFilter, setDifficultyFilter] = useState('ALL');
+  const [unitFilter, setUnitFilter] = useState('ALL');
+  const [generatedByFilter, setGeneratedByFilter] = useState('ALL');
+  const [generatedDateFilter, setGeneratedDateFilter] = useState('');
   const effectiveSubject = controlledSubject ?? localSubject;
   const effectiveSearch = controlledSearch ?? localSearch;
   const subjects = Array.from(new Set(batches.map((batch) => batch.subject))).sort();
   const courses = Array.from(new Set(batches.map((batch) => batch.course))).sort();
   const semesters = Array.from(new Set(batches.map((batch) => batch.semester))).sort();
   const statuses = Array.from(new Set<string>(batches.map((batch) => batch.reviewStatus))).sort();
+  const difficulties = Array.from(new Set(batches.map((batch) => batch.difficulty))).sort();
+  const units = Array.from(new Set(batches.flatMap((batch) => batch.selectedUnits || []))).sort();
+  const generatedBy = Array.from(new Map<string, string>(
+    batches.map((batch): [string, string] => [batch.generatedBy, batch.generatedByName])
+  ).entries())
+    .map(([id, name]) => ({ id, name }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 
   const filteredBatches = useMemo(() => {
     const term = effectiveSearch.trim().toLocaleLowerCase();
@@ -54,6 +71,10 @@ export const AiGenerationBatchCards: React.FC<AiGenerationBatchCardsProps> = ({
       if (courseFilter !== 'ALL' && batch.course !== courseFilter) return false;
       if (semesterFilter !== 'ALL' && batch.semester !== semesterFilter) return false;
       if (statusFilter !== 'ALL' && batch.reviewStatus !== statusFilter) return false;
+      if (difficultyFilter !== 'ALL' && batch.difficulty !== difficultyFilter) return false;
+      if (unitFilter !== 'ALL' && !(batch.selectedUnits || []).includes(unitFilter)) return false;
+      if (generatedByFilter !== 'ALL' && batch.generatedBy !== generatedByFilter) return false;
+      if (generatedDateFilter && localDateKey(batch.generatedAt) !== generatedDateFilter) return false;
       if (!term) return true;
       return [
         batch.generationId,
@@ -68,7 +89,7 @@ export const AiGenerationBatchCards: React.FC<AiGenerationBatchCardsProps> = ({
       ].some((value) => value.toLocaleLowerCase().includes(term)) ||
         (questionSearchTextByBatch[batch.generationId] || '').toLocaleLowerCase().includes(term);
     });
-  }, [batches, courseFilter, effectiveSearch, effectiveSubject, questionSearchTextByBatch, semesterFilter, statusFilter]);
+  }, [batches, courseFilter, difficultyFilter, effectiveSearch, effectiveSubject, generatedByFilter, generatedDateFilter, questionSearchTextByBatch, semesterFilter, statusFilter, unitFilter]);
 
   const openBatch = async (batch: AiGenerationBatch) => {
     setSelectedBatch(batch);
@@ -170,6 +191,40 @@ export const AiGenerationBatchCards: React.FC<AiGenerationBatchCardsProps> = ({
           <option value="ALL">All Review Statuses</option>
           {statuses.map((item) => <option key={item} value={item}>{item.replace(/_/g, ' ')}</option>)}
         </select>
+        <select
+          value={difficultyFilter}
+          onChange={(event) => setDifficultyFilter(event.target.value)}
+          aria-label="Filter batches by difficulty"
+          className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-[13px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+        >
+          <option value="ALL">All Difficulties</option>
+          {difficulties.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+        <select
+          value={unitFilter}
+          onChange={(event) => setUnitFilter(event.target.value)}
+          aria-label="Filter batches by syllabus unit"
+          className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-[13px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+        >
+          <option value="ALL">All Units</option>
+          {units.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+        <select
+          value={generatedByFilter}
+          onChange={(event) => setGeneratedByFilter(event.target.value)}
+          aria-label="Filter batches by creator"
+          className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-[13px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+        >
+          <option value="ALL">All Faculty</option>
+          {generatedBy.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+        <input
+          type="date"
+          value={generatedDateFilter}
+          onChange={(event) => setGeneratedDateFilter(event.target.value)}
+          aria-label="Filter batches by generation date"
+          className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-[13px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+        />
       </div>
       {filteredBatches.map((batch) => {
         return (
@@ -190,6 +245,11 @@ export const AiGenerationBatchCards: React.FC<AiGenerationBatchCardsProps> = ({
                   <p className="text-[13px] text-slate-500 dark:text-slate-400">
                     {batch.course} · {batch.semester} · Topic: {batch.topic}
                   </p>
+                  {batch.selectedUnits?.length ? (
+                    <p className="text-[13px] text-slate-500 dark:text-slate-400">
+                      Units: {batch.selectedUnits.join(', ')}
+                    </p>
+                  ) : null}
                   <p className="mt-1 flex items-center gap-1.5 text-[13px] text-slate-500 dark:text-slate-400">
                     <FileText className="h-3.5 w-3.5 shrink-0" />
                     <span className="truncate">{batch.sourceFileName}</span>

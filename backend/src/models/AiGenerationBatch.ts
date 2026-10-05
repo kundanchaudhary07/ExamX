@@ -15,13 +15,14 @@ export interface IAiGenerationBatchDocument extends Document {
   course: string;
   semester: string;
   topic: string;
+  selectedUnits?: string[];
   difficulty: QuestionDifficulty | 'MIXED';
   marksPerQuestion: number;
   requestedCount: number;
   generatedCount: number;
   syllabusId: string;
   sourceFileName: string;
-  provider: 'GEMINI' | 'GROQ';
+  provider: 'GROQ';
   aiModel: string;
   generatedAt: Date;
   createdAt: Date;
@@ -37,13 +38,14 @@ const AiGenerationBatchSchema = new Schema<IAiGenerationBatchDocument>(
     course: { type: String, required: true, trim: true, index: true },
     semester: { type: String, required: true, trim: true, index: true },
     topic: { type: String, required: true, trim: true },
+    selectedUnits: { type: [String], default: [] },
     difficulty: { type: String, enum: ['EASY', 'MEDIUM', 'HARD', 'MIXED'], required: true },
     marksPerQuestion: { type: Number, required: true, min: 1 },
     requestedCount: { type: Number, required: true, min: 1, max: 200 },
     generatedCount: { type: Number, required: true, min: 1, max: 200 },
     syllabusId: { type: String, required: true, index: true },
     sourceFileName: { type: String, required: true, trim: true },
-    provider: { type: String, enum: ['GEMINI', 'GROQ'], required: true },
+    provider: { type: String, enum: ['GROQ'], required: true },
     aiModel: { type: String, required: true, trim: true },
     generatedAt: { type: Date, required: true, default: Date.now, index: true }
   },

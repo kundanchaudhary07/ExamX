@@ -263,6 +263,21 @@ async function runPhase17QuestionBankAiTests() {
     assert.strictEqual(q1.semester, 'Semester 4');
     const q1Id = q1.questionId;
 
+    const mismatchedManualQuestionExam = await apiRequest('POST', '/api/exams', {
+      title: 'Exam With Mismatched Manual Question',
+      subject: 'Data Structures',
+      course: 'B.Tech IT',
+      semester: 'Semester 5',
+      durationMinutes: 30,
+      questions: [q1Id],
+      status: 'DRAFT'
+    }, teacherAToken);
+    assert.strictEqual(
+      mismatchedManualQuestionExam.status,
+      400,
+      'Manual questions with incompatible course/semester context cannot be attached'
+    );
+
     // 3.2 Teacher B creates Question 2
     const createQ2Res = await apiRequest('POST', '/api/questions', {
       questionText: 'Which protocol functions at the Transport layer of the OSI model?',
@@ -407,7 +422,7 @@ async function runPhase17QuestionBankAiTests() {
     const aiStatusRes = await apiRequest('GET', '/api/ai/status', undefined, teacherAToken);
     assert.strictEqual(aiStatusRes.status, 200);
     const expectedAiStatus = AiQuestionService.isConfigured() ? 'READY' : 'NOT_CONFIGURED';
-    assert.strictEqual(aiStatusRes.body.data.status, expectedAiStatus, 'AI status must reflect whether the Gemini provider is configured');
+    assert.strictEqual(aiStatusRes.body.data.status, expectedAiStatus, 'AI status must reflect whether the Groq provider is configured');
 
     // 6.2 Student access to AI generation is denied (403)
     const studentAiRes = await apiRequest('POST', '/api/ai/questions/generate', { subject: 'AI Basics' }, student1Token);
@@ -422,6 +437,26 @@ Dynamic Programming: Matrix Chain Multiplication, Longest Common Subsequence, Kn
 `;
     const syllabusBase64 = Buffer.from(validSyllabusText, 'utf8').toString('base64');
 
+    const syllabusCountBeforeMismatch = await Syllabus.countDocuments();
+    const wrongSubjectUpload = await apiRequest('POST', '/api/ai/syllabus/upload', {
+      fileName: 'Cloud_Syllabus.txt',
+      fileBase64: Buffer.from(
+        'UNIT I: Cloud microservices. Cloud computing uses Docker, Kubernetes, AWS, and cloud-native deployments. ' +
+        'Microservices provide service discovery, containerization, and scalable cloud applications.',
+        'utf8'
+      ).toString('base64'),
+      mimeType: 'text/plain',
+      course: 'B.Tech CSE',
+      semester: 'Semester 4',
+      subject: 'Artificial Intelligence'
+    }, teacherAToken);
+    assert.strictEqual(wrongSubjectUpload.status, 422);
+    assert.strictEqual(
+      wrongSubjectUpload.body.message,
+      'You have uploaded/selected the wrong subject. Please upload the syllabus for the selected subject.'
+    );
+    assert.equal(await Syllabus.countDocuments(), syllabusCountBeforeMismatch, 'A rejected syllabus must not be persisted');
+
     const uploadRes = await apiRequest('POST', '/api/ai/syllabus/upload', {
       fileName: 'CSE301_Syllabus.txt',
       fileBase64: syllabusBase64,
@@ -431,6 +466,7 @@ Dynamic Programming: Matrix Chain Multiplication, Longest Common Subsequence, Kn
       subject: 'Advanced Data Structures'
     }, teacherAToken);
     assert.strictEqual(uploadRes.status, 201);
+    assert.deepEqual(uploadRes.body.data.availableUnits, ['UNIT I']);
     assert(uploadRes.body.data.charCount > 100);
     assert(uploadRes.body.data.syllabusId);
     assert.strictEqual(uploadRes.body.data.uploadedBy, undefined, 'Upload response must not expose private extracted source identity');
@@ -473,7 +509,7 @@ Dynamic Programming: Matrix Chain Multiplication, Longest Common Subsequence, Kn
       assert.strictEqual(genRes.status, 503);
       assert.strictEqual(genRes.body.code, 'AI_GENERATION_NOT_CONFIGURED');
       assert.strictEqual(await Question.countDocuments({ syllabusId: uploadRes.body.data.syllabusId }), 0);
-      console.log('ℹ 6. LIVE_GEMINI_NOT_CONFIGURED; backend returned AI_GENERATION_NOT_CONFIGURED without creating drafts.');
+      console.log('ℹ 6. LIVE_GROQ_NOT_CONFIGURED; backend returned AI_GENERATION_NOT_CONFIGURED without creating drafts.');
     } else {
       const genRes = await apiRequest('POST', '/api/ai/questions/generate', {
         syllabusId: uploadRes.body.data.syllabusId,

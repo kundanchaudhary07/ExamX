@@ -11,7 +11,8 @@ import {
   StudentDetailsData,
   SyllabusExtractData,
   ProctoringEventRecord,
-  ExamAttemptRecord
+  ExamAttemptRecord,
+  AssistanceRequestRecord
 } from '../../types';
 import { TopicMasteryChart } from '../Charts';
 import { TeacherExamScheduler } from './TeacherExamScheduler';
@@ -23,8 +24,8 @@ import {
   SEMESTERS,
   SECTIONS
 } from '../../constants';
-import { generateQuestionsWithAI } from '../../services/geminiService';
-import { dbService } from '../../services/dbService';
+import { generateQuestionsWithAI } from '../../services/questionGenerationService';
+import { dbService, mapBackendUserToSystemUser } from '../../services/dbService';
 import { CreatableSubjectCombobox } from '../common/CreatableSubjectCombobox';
 import { AiGenerationBatchCards } from './AiGenerationBatchCards';
 import { realtimeService } from '../../services/realtimeService';
@@ -62,7 +63,12 @@ import {
   BarChart2,
   Upload,
   Eye,
-  User as UserIcon
+  User as UserIcon,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 
 const AI_GENERATION_COURSES = [
@@ -108,8 +114,20 @@ interface TeacherDashboardProps {
   onUpdateQuestion: (q: Question) => Promise<void> | void;
   onDeleteQuestion: (id: string) => Promise<void> | void;
   onPublishResult: (id: string) => Promise<void> | void;
-  onPublishAllForExam?: (examId: string) => Promise<void> | void;
-  onResolveQuery: (id: string, response: string, status?: 'RESOLVED' | 'REJECTED') => Promise<void> | void;
+  onStatusChange?: (
+    examId: string,
+    status: Parameters<typeof dbService.updateExamStatus>[1],
+    publishResults?: boolean
+  ) => Promise<void> | void;
+  onResolveQueryDetailed?: (
+    id: string,
+    payload: {
+      resolutionType: NonNullable<StudentQuery['resolutionType']>;
+      resolutionNotes: string;
+      scoreAdjustment?: number;
+      correctedAnswer?: string;
+    }
+  ) => Promise<void> | void;
   onSaveExam: (exam: ScheduledExam) => Promise<void> | void;
   onDeleteExam?: (examId: string) => Promise<void> | void;
   onRefreshData?: () => Promise<void> | void;
@@ -127,8 +145,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   onUpdateQuestion,
   onDeleteQuestion,
   onPublishResult,
-  onPublishAllForExam,
-  onResolveQuery,
+  onStatusChange,
+  onResolveQueryDetailed,
   onSaveExam,
   onDeleteExam,
   onRefreshData
@@ -137,6 +155,27 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [students, setStudents] = useState<SystemUser[]>([]);
   const [proctoringEvents, setProctoringEvents] = useState<ProctoringEventRecord[]>([]);
   const [attempts, setAttempts] = useState<ExamAttemptRecord[]>([]);
+  const [assistanceRequests, setAssistanceRequests] = useState<AssistanceRequestRecord[]>([]);
+  const [monitoringExamId, setMonitoringExamId] = useState('');
+  const [monitoringSearch, setMonitoringSearch] = useState('');
+  const [monitoringStatusFilter, setMonitoringStatusFilter] = useState('ALL');
+  const [monitoringRiskFilter, setMonitoringRiskFilter] = useState('ALL');
+  const [monitoringWarningsFilter, setMonitoringWarningsFilter] = useState('ALL');
+  const [monitoringConnectionFilter, setMonitoringConnectionFilter] = useState('ALL');
+  const [monitoringProgressFilter, setMonitoringProgressFilter] = useState('ALL');
+  const [monitoringAssistanceFilter, setMonitoringAssistanceFilter] = useState('ALL');
+  const [monitoringSort, setMonitoringSort] = useState('RISK');
+  const [monitoringPage, setMonitoringPage] = useState(1);
+  const [monitoringPageSize, setMonitoringPageSize] = useState(25);
+  const [selectedMonitoringStudentIds, setSelectedMonitoringStudentIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [queryStatusFilter, setQueryStatusFilter] = useState<'ALL' | 'PENDING' | 'RESOLVED'>('ALL');
+  const [monitoringNow, setMonitoringNow] = useState(Date.now());
+  const [monitoringLastUpdated, setMonitoringLastUpdated] = useState<Date | null>(null);
+  const [monitoringRealtimeConnected, setMonitoringRealtimeConnected] = useState(() =>
+    realtimeService.isConnected()
+  );
   const [aiStatus, setAiStatus] = useState<{
     configured: boolean;
     status: 'READY' | 'GENERATING' | 'NOT_CONFIGURED' | 'ERROR' | 'PENDING_REVIEW';
@@ -158,6 +197,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [selectedResultDetail, setSelectedResultDetail] = useState<StudentResult | null>(null);
   const [selectedQueryDetail, setSelectedQueryDetail] = useState<StudentQuery | null>(null);
   const [selectedProctoringDetail, setSelectedProctoringDetail] = useState<ProctoringEventRecord | null>(null);
+  const [selectedMonitoringAttempt, setSelectedMonitoringAttempt] = useState<ExamAttemptRecord | null>(null);
 
   const [studentForm, setStudentForm] = useState({
     name: '',
@@ -243,6 +283,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [aiMarks, setAiMarks] = useState(2);
   const [syllabusFile, setSyllabusFile] = useState<File | null>(null);
   const [extractedSyllabus, setExtractedSyllabus] = useState<SyllabusExtractData | null>(null);
+  const [selectedSyllabusUnits, setSelectedSyllabusUnits] = useState<string[]>([]);
   const [isExtractingSyllabus, setIsExtractingSyllabus] = useState(false);
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [aiDrafts, setAiDrafts] = useState<Question[]>([]);
@@ -271,8 +312,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   }, []);
 
   // Query Adjudication State
-  const [replyText, setReplyText] = useState<Record<string, string>>({});
-  const [submittingQueryId, setSubmittingQueryId] = useState<string | null>(null);
 
   // Exam draft preservation when jumping between Create Exam and AI Generator
   const [savedExamDraft, setSavedExamDraft] = useState<{
@@ -284,28 +323,87 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   // Feedback banner
   const [feedbackBanner, setFeedbackBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  const loadTeacherData = useCallback(async () => {
-    setIsLoadingDirectory(true);
+  const loadTeacherData = useCallback(async (showLoading = true) => {
+    if (showLoading) setIsLoadingDirectory(true);
     setDirectoryError(null);
     try {
-      const [studentList, proctorList, attemptList] = await Promise.all([
+      const [studentList, proctorList, attemptList, assistanceList] = await Promise.all([
         dbService.getStudents(),
-        dbService.getProctoringEvents().catch(() => []),
-        dbService.getAttempts().catch(() => [])
+        dbService.getProctoringEvents(),
+        dbService.getAttempts(),
+        dbService.getUnblockRequests()
       ]);
       setStudents(studentList);
       setProctoringEvents(proctorList);
       setAttempts(attemptList);
+      setAssistanceRequests(assistanceList);
+      setMonitoringLastUpdated(new Date());
     } catch (err: any) {
       setDirectoryError(err.message || 'Unable to load dashboard data. Try again.');
     } finally {
-      setIsLoadingDirectory(false);
+      if (showLoading) setIsLoadingDirectory(false);
     }
   }, []);
+
+  const handleAssistanceReview = (
+    requestId: string,
+    status: 'APPROVED' | 'REJECTED'
+  ) => {
+    const approved = status === 'APPROVED';
+    confirmAction({
+      title: approved ? 'Approve examination resume' : 'Reject assistance and submit exam',
+      message: approved
+        ? 'Allow this student to resume the same preserved examination attempt?'
+        : 'Rejecting this request will submit the student\'s current attempt and close the examination.',
+      confirmLabel: approved ? 'Approve resume' : 'Reject and submit',
+      cancelLabel: 'Cancel',
+      variant: approved ? 'primary' : 'danger',
+      consequence: approved
+        ? 'The existing attempt resumes with its saved answers, warning history, question position, and server timer.'
+        : 'The existing answers and proctoring history are preserved, but the submitted attempt cannot be resumed.',
+      action: async () => {
+        try {
+          const request = await dbService.reviewUnblockRequest(
+            requestId,
+            status,
+            approved
+              ? 'Faculty approved resumption of the suspended attempt.'
+              : 'Attempt remains suspended pending further review.'
+          );
+          setAssistanceRequests(previous => [
+            request,
+            ...previous.filter(item => item.requestId !== request.requestId)
+          ]);
+          const { attempt } = await dbService.getAttemptById(request.attemptId);
+          setAttempts(previous => [
+            attempt,
+            ...previous.filter(item => item.attemptId !== attempt.attemptId)
+          ]);
+          setMonitoringLastUpdated(new Date());
+          setFeedbackBanner({
+            type: 'success',
+            message: approved
+              ? 'Student may resume the preserved attempt.'
+              : 'The assistance request was rejected and the attempt was submitted.'
+          });
+        } catch (error: any) {
+          setFeedbackBanner({
+            type: 'error',
+            message: error?.message || 'Unable to review this assistance request.'
+          });
+        }
+      }
+    });
+  };
 
   useEffect(() => {
     loadTeacherData();
   }, [loadTeacherData]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setMonitoringNow(Date.now()), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     refreshAiReviewData();
@@ -313,20 +411,85 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
   useEffect(() => {
     const unsub = realtimeService.subscribe(payload => {
+      const data = payload.data as Record<string, any> | undefined;
+      if (payload.event === 'monitoring.updated' && data?.attempt) {
+        const incoming = data.attempt as ExamAttemptRecord;
+        setAttempts(previous => [
+          incoming,
+          ...previous.filter(attempt => attempt.attemptId !== incoming.attemptId)
+        ]);
+        setMonitoringLastUpdated(new Date());
+        return;
+      }
+      if (payload.event === 'proctoring.event' && data?.event) {
+        const incoming = data.event as ProctoringEventRecord;
+        setProctoringEvents(previous => [
+          incoming,
+          ...previous.filter(event => event.eventId !== incoming.eventId)
+        ]);
+        setMonitoringLastUpdated(new Date());
+        return;
+      }
+      if ((payload.event === 'unblock.created' || payload.event === 'unblock.updated') && data?.request) {
+        const incoming = data.request as AssistanceRequestRecord;
+        setAssistanceRequests(previous => [
+          incoming,
+          ...previous.filter(request => request.requestId !== incoming.requestId)
+        ]);
+        if (data.attempt) {
+          const attempt = data.attempt as ExamAttemptRecord;
+          setAttempts(previous => [
+            attempt,
+            ...previous.filter(item => item.attemptId !== attempt.attemptId)
+          ]);
+        }
+        setMonitoringLastUpdated(new Date());
+        return;
+      }
+      if (payload.event === 'attempt.suspended' && data?.attemptId) {
+        setAttempts(previous => previous.map(attempt => attempt.attemptId === data.attemptId
+          ? {
+              ...attempt,
+              suspended: true,
+              proctoringStatus: 'SUSPENDED',
+              warningCount: data.warningCount ?? attempt.warningCount
+            }
+          : attempt));
+        setMonitoringLastUpdated(new Date());
+        return;
+      }
+      if (payload.event === 'attempt.resumed' && data?.attemptId) {
+        setAttempts(previous => previous.map(attempt => attempt.attemptId === data.attemptId
+          ? { ...attempt, suspended: false, proctoringStatus: 'WARNED' }
+          : attempt));
+        setMonitoringLastUpdated(new Date());
+        return;
+      }
       if (
-        payload.event.startsWith('student.') ||
-        payload.event.startsWith('proctoring.') ||
-        payload.event.startsWith('exam.') ||
-        payload.event.startsWith('question.') ||
-        payload.event.startsWith('result.') ||
-        payload.event.startsWith('query.')
+        payload.event === 'student.updated' &&
+        data?.student
       ) {
-        loadTeacherData();
-        if (payload.event.startsWith('question.')) refreshAiReviewData();
+        const student = mapBackendUserToSystemUser(data.student);
+        setStudents(previous => previous.map(item =>
+          (item.userId || item.id) === (student.userId || student.id) ? student : item
+        ));
+        setSelectedStudentDetails(previous =>
+          previous && (previous.student.userId || previous.student.id) === (student.userId || student.id)
+            ? { ...previous, student }
+            : previous
+        );
+        return;
       }
     });
-    return () => unsub();
-  }, [loadTeacherData, refreshAiReviewData]);
+    const unsubStatus = realtimeService.subscribeStatus(status => {
+      setMonitoringRealtimeConnected(status.connected);
+      if (status.connected && status.reconnected) void loadTeacherData(false);
+    });
+    return () => {
+      unsub();
+      unsubStatus();
+    };
+  }, [loadTeacherData]);
 
   const handleOpenStudentDetails = async (studentId: string) => {
     setIsLoadingStudentDetails(true);
@@ -427,6 +590,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     setAiError(null);
     setSyllabusFile(file);
     setExtractedSyllabus(null);
+    setSelectedSyllabusUnits([]);
     if (!file) return;
 
     if (file.size > 10 * 1024 * 1024) {
@@ -455,6 +619,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         subject: aiTopic
       });
       setExtractedSyllabus(uploaded);
+      setSelectedSyllabusUnits([]);
       setFeedbackBanner({
         type: 'success',
         message: `Uploaded ${uploaded.fileName} (${uploaded.wordCount || 0} extracted words).`
@@ -493,6 +658,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           course: aiCourse,
           semester: aiSemester,
           topic: aiSubtopic.trim() || undefined,
+          selectedUnits: selectedSyllabusUnits,
           questionType: aiQuestionType
         }
       );
@@ -528,7 +694,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     try {
       await dbService.approveAiDraft(draftId);
       await refreshAiReviewData();
-      if (onRefreshData) await onRefreshData();
       setFeedbackBanner({
         type: 'success',
         message: 'Approved question saved to Question Bank.'
@@ -617,7 +782,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         userId: res.credentials.userId,
         temporaryPassword: res.credentials.password
       });
-      await loadTeacherData();
+      if (res.student) {
+        setStudents(previous => [res.student, ...previous.filter(item =>
+          (item.userId || item.id) !== (res.student.userId || res.student.id)
+        )]);
+      }
     } catch (err: any) {
       setStudentCreateError(err.message || 'Failed to create student account.');
     } finally {
@@ -710,8 +879,17 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       action: async () => {
         const nextStatus = isBlocking ? 'BLOCKED' : 'ACTIVE';
         try {
-          await dbService.updateUserStatus(student.userId || student.id, nextStatus);
-          await loadTeacherData();
+          const updatedStudent = await dbService.updateUserStatus(student.userId || student.id, nextStatus);
+          setStudents(previous => previous.map(item =>
+            (item.userId || item.id) === (updatedStudent.userId || updatedStudent.id)
+              ? updatedStudent
+              : item
+          ));
+          setSelectedStudentDetails(previous =>
+            previous && (previous.student.userId || previous.student.id) === (updatedStudent.userId || updatedStudent.id)
+              ? { ...previous, student: updatedStudent }
+              : previous
+          );
           setFeedbackBanner({
             type: 'success',
             message: `Student ${student.name} status updated to ${nextStatus}.`
@@ -738,12 +916,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       consequence: "The student's active examination attempt will be terminated immediately due to proctoring policy violation. Recorded responses will be finalized.",
       action: async () => {
         try {
-          await dbService.submitExamAttempt(attemptId, {
+          const submitted = await dbService.submitExamAttempt(attemptId, {
             terminatedByProctor: true,
             terminationReason: 'Faculty / Proctoring policy violation'
           });
+          setAttempts(previous => [
+            submitted.attempt,
+            ...previous.filter(item => item.attemptId !== submitted.attempt.attemptId)
+          ]);
           setSelectedProctoringDetail(null);
-          await loadTeacherData();
           setFeedbackBanner({
             type: 'success',
             message: `Attempt ${attemptId} has been terminated.`
@@ -834,13 +1015,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     }, {});
   const aiDraftGroups = Object.keys(aiDraftGroupMap).map((generationId) => aiDraftGroupMap[generationId]);
 
-  // Compute Topic Mastery from real results
+  // Aggregate permitted student results for subject-level analytics.
   const subjectStatsMap: Record<string, { totalPct: number; count: number }> = {};
   results.forEach(r => {
     const key = r.subject || r.topic || 'General';
     if (!subjectStatsMap[key]) subjectStatsMap[key] = { totalPct: 0, count: 0 };
     const pct =
-      r.accuracy !== undefined
+      r.percentage !== undefined
+        ? r.percentage
+        : r.accuracy !== undefined
         ? r.accuracy
         : r.totalQuestions > 0
         ? Math.round((r.score / r.totalQuestions) * 100)
@@ -850,8 +1033,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   });
   const masteryData = Object.entries(subjectStatsMap).map(([subject, data]) => ({
     subject: subject.length > 18 ? `${subject.slice(0, 18)}...` : subject,
-    A: Math.round(data.totalPct / data.count),
-    fullMark: 100
+    averagePercentage: Math.round(data.totalPct / data.count),
+    submissions: data.count
   }));
 
   // Authoritative Real Metrics Derived Directly from Database State
@@ -899,6 +1082,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const openQueriesCount = queries.filter(
     q => q.status === 'OPEN' || q.status === 'PENDING' || q.status === 'UNDER_REVIEW'
   ).length;
+  const visibleQueries = queries.filter(query => {
+    const pending = ['OPEN', 'PENDING', 'UNDER_REVIEW'].includes(query.status);
+    const resolved = ['RESOLVED', 'APPROVED', 'REJECTED', 'RESOLVED_ACCEPTED', 'RESOLVED_REJECTED'].includes(query.status);
+    return queryStatusFilter === 'ALL' || (queryStatusFilter === 'PENDING' ? pending : resolved);
+  });
   const resolvedQueriesCount = queries.filter(
     q =>
       q.status === 'RESOLVED' ||
@@ -914,11 +1102,292 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
   const activeAttemptsCount = attempts.filter(a => a.status === 'IN_PROGRESS').length;
   const blockedAttemptsCount = attempts.filter(
-    a => a.status === 'TERMINATED' || a.proctoringStatus === 'TERMINATED'
+    a => a.suspended || a.status === 'TERMINATED' || a.proctoringStatus === 'TERMINATED'
   ).length;
   const submittedAttemptsCount = attempts.filter(
     a => a.status === 'SUBMITTED' || a.status === 'EVALUATED'
   ).length;
+
+  const monitoringExams = exams.filter(exam =>
+    exam.status === 'LIVE' ||
+    attempts.some(attempt => attempt.examId === (exam.examId || exam.id) && attempt.status === 'IN_PROGRESS')
+  );
+  const selectedMonitoringExam =
+    monitoringExams.find(exam => (exam.examId || exam.id) === monitoringExamId) ||
+    monitoringExams.find(exam => exam.status === 'LIVE') ||
+    monitoringExams[0];
+  const selectedMonitoringExamId = selectedMonitoringExam?.examId || selectedMonitoringExam?.id || '';
+  const monitoringExamAttempts = attempts
+    .filter(attempt => attempt.examId === selectedMonitoringExamId)
+    .slice()
+    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  const monitoringAttemptByStudent = new Map<string, ExamAttemptRecord>();
+  monitoringExamAttempts.forEach(attempt => {
+    if (!monitoringAttemptByStudent.has(attempt.studentId)) {
+      monitoringAttemptByStudent.set(attempt.studentId, attempt);
+    }
+  });
+  const monitoringEventByStudent = new Map<string, ProctoringEventRecord>();
+  proctoringEvents
+    .filter(event => event.examId === selectedMonitoringExamId)
+    .slice()
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .forEach(event => {
+      if (!monitoringEventByStudent.has(event.studentId)) {
+        monitoringEventByStudent.set(event.studentId, event);
+      }
+    });
+  const monitoringAssistanceByStudent = new Map<string, AssistanceRequestRecord>();
+  const monitoringAssistanceByAttempt = new Map<string, AssistanceRequestRecord>();
+  assistanceRequests
+    .filter(request => request.examId === selectedMonitoringExamId)
+    .slice()
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .forEach(request => {
+      if (!monitoringAssistanceByStudent.has(request.studentId)) {
+        monitoringAssistanceByStudent.set(request.studentId, request);
+      }
+      if (!monitoringAssistanceByAttempt.has(request.attemptId)) {
+        monitoringAssistanceByAttempt.set(request.attemptId, request);
+      }
+    });
+  const assignedMonitoringStudentIds = new Set([
+    ...(selectedMonitoringExam?.assignedStudentIds || []),
+    ...monitoringExamAttempts.map(attempt => attempt.studentId)
+  ]);
+  const monitoringStudents = Array.from(assignedMonitoringStudentIds).map(studentId => {
+    const student = students.find(item => item.userId === studentId);
+    const attempt = monitoringAttemptByStudent.get(studentId);
+    const lastEvent = monitoringEventByStudent.get(studentId);
+    const assistance = attempt
+      ? monitoringAssistanceByAttempt.get(attempt.attemptId)
+      : monitoringAssistanceByStudent.get(studentId);
+    const warningCount = attempt?.warningCount || lastEvent?.warningCountAfter || 0;
+    const risk: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'N/A' =
+      !attempt
+        ? 'N/A'
+        : attempt.suspended || attempt.status === 'TERMINATED' || warningCount >= 5
+        ? 'CRITICAL'
+        : attempt?.proctoringStatus === 'FLAGGED' || warningCount >= 3
+        ? 'HIGH'
+        : attempt?.proctoringStatus === 'WARNED' || warningCount > 0
+        ? 'MEDIUM'
+        : attempt?.proctoringStatus === 'CLEAN'
+        ? 'LOW'
+        : 'N/A';
+    const lastHeartbeatTime = attempt?.lastHeartbeatAt
+      ? new Date(attempt.lastHeartbeatAt).getTime()
+      : 0;
+    const connection: 'ONLINE' | 'OFFLINE' | 'N/A' =
+      !attempt || attempt.status !== 'IN_PROGRESS'
+        ? 'N/A'
+        : lastHeartbeatTime > 0 && monitoringNow - lastHeartbeatTime < 45000
+        ? 'ONLINE'
+        : 'OFFLINE';
+    const totalQuestions =
+      selectedMonitoringExam?.questionCount ||
+      selectedMonitoringExam?.questionIds?.length ||
+      attempt?.answers.length ||
+      0;
+    const answered = attempt?.answers.filter(answer => Boolean(answer.selectedOption)).length || 0;
+    const isSubmitted = Boolean(attempt && ['SUBMITTED', 'EVALUATED', 'EXPIRED'].includes(attempt.status));
+    const status =
+      !attempt ? 'NOT_STARTED'
+      : attempt.suspended ? 'SUSPENDED'
+      : isSubmitted ? 'SUBMITTED'
+      : connection === 'OFFLINE' ? 'OFFLINE'
+      : risk !== 'LOW' || assistance?.status === 'PENDING' ? 'NEEDS_ATTENTION'
+      : attempt.status === 'IN_PROGRESS' ? 'ACTIVE'
+      : attempt.status;
+    const lastActivityAt = [
+      attempt?.lastHeartbeatAt,
+      lastEvent?.timestamp,
+      attempt?.submittedAt,
+      attempt?.startedAt
+    ]
+      .filter((value): value is string => Boolean(value))
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+    return {
+      studentId,
+      studentName: student?.name || attempt?.studentName || studentId,
+      attempt,
+      totalQuestions,
+      answered,
+      progress: totalQuestions ? Math.round((answered / totalQuestions) * 100) : 0,
+      currentQuestion: attempt ? Math.min((attempt.currentQuestionIndex || 0) + 1, totalQuestions || 1) : 0,
+      risk,
+      warningCount,
+      connection,
+      status,
+      assistance,
+      lastEvent,
+      lastActivityAt,
+      remainingSeconds: attempt?.expiresAt && attempt.status === 'IN_PROGRESS'
+        ? Math.max(0, Math.floor((new Date(attempt.expiresAt).getTime() - monitoringNow) / 1000))
+        : 0
+    };
+  });
+  const riskOrder: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, 'N/A': 0 };
+  const getWarningMatch = (warningCount: number) => {
+    if (monitoringWarningsFilter === '0') return warningCount === 0;
+    if (monitoringWarningsFilter === '1-2') return warningCount >= 1 && warningCount <= 2;
+    if (monitoringWarningsFilter === '3-4') return warningCount >= 3 && warningCount <= 4;
+    if (monitoringWarningsFilter === '5') return warningCount >= 5;
+    return true;
+  };
+  const filteredMonitoringStudents = monitoringStudents
+    .filter(row => {
+      const query = monitoringSearch.trim().toLowerCase();
+      return (!query || `${row.studentName} ${row.studentId}`.toLowerCase().includes(query)) &&
+        (monitoringStatusFilter === 'ALL' || row.status === monitoringStatusFilter) &&
+        (monitoringRiskFilter === 'ALL' ||
+          (monitoringRiskFilter === 'HIGH_RISK' && (row.risk === 'HIGH' || row.risk === 'CRITICAL')) ||
+          row.risk === monitoringRiskFilter) &&
+        getWarningMatch(row.warningCount) &&
+        (monitoringConnectionFilter === 'ALL' || row.connection === monitoringConnectionFilter) &&
+        (monitoringProgressFilter === 'ALL' ||
+          (monitoringProgressFilter === 'NOT_STARTED' && row.status === 'NOT_STARTED') ||
+          (monitoringProgressFilter === 'IN_PROGRESS' && ['ACTIVE', 'NEEDS_ATTENTION', 'OFFLINE', 'SUSPENDED'].includes(row.status)) ||
+          (monitoringProgressFilter === 'ALMOST_FINISHED' && row.progress >= 80 && ['ACTIVE', 'NEEDS_ATTENTION', 'OFFLINE', 'SUSPENDED'].includes(row.status)) ||
+          (monitoringProgressFilter === 'SUBMITTED' && row.status === 'SUBMITTED')) &&
+        (monitoringAssistanceFilter === 'ALL' ||
+          (monitoringAssistanceFilter === 'NONE' && !row.assistance) ||
+          row.assistance?.status === monitoringAssistanceFilter);
+    })
+    .sort((a, b) => {
+      switch (monitoringSort) {
+        case 'WARNINGS': return b.warningCount - a.warningCount || riskOrder[b.risk] - riskOrder[a.risk];
+        case 'LAST_ACTIVITY': return new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime();
+        case 'PROGRESS': return b.progress - a.progress;
+        case 'TIME':
+          if (Boolean(a.attempt && a.attempt.status === 'IN_PROGRESS') !== Boolean(b.attempt && b.attempt.status === 'IN_PROGRESS')) {
+            return a.attempt?.status === 'IN_PROGRESS' ? -1 : 1;
+          }
+          return a.remainingSeconds - b.remainingSeconds;
+        case 'NAME': return a.studentName.localeCompare(b.studentName);
+        default: return riskOrder[b.risk] - riskOrder[a.risk] ||
+          new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime();
+      }
+    });
+  const monitoringPageCount = Math.max(1, Math.ceil(filteredMonitoringStudents.length / monitoringPageSize));
+  const currentMonitoringPage = Math.min(monitoringPage, monitoringPageCount);
+  const pagedMonitoringStudents = filteredMonitoringStudents.slice(
+    (currentMonitoringPage - 1) * monitoringPageSize,
+    currentMonitoringPage * monitoringPageSize
+  );
+  const visibleMonitoringPages = Array.from(
+    { length: Math.min(5, monitoringPageCount) },
+    (_, index) => Math.max(1, Math.min(monitoringPageCount - 4, currentMonitoringPage - 2)) + index
+  );
+  const attentionRows = monitoringStudents
+    .filter(row => ['NEEDS_ATTENTION', 'SUSPENDED', 'OFFLINE'].includes(row.status))
+    .sort((a, b) => riskOrder[b.risk] - riskOrder[a.risk] ||
+      new Date(b.lastEvent?.timestamp || b.lastActivityAt || 0).getTime() -
+      new Date(a.lastEvent?.timestamp || a.lastActivityAt || 0).getTime());
+  const riskCounts = {
+    LOW: monitoringStudents.filter(row => row.risk === 'LOW').length,
+    MEDIUM: monitoringStudents.filter(row => row.risk === 'MEDIUM').length,
+    HIGH: monitoringStudents.filter(row => row.risk === 'HIGH').length,
+    CRITICAL: monitoringStudents.filter(row => row.risk === 'CRITICAL').length
+  };
+  const studentsWithRiskData = Object.values(riskCounts).reduce((sum, count) => sum + count, 0);
+  const monitoringCounts = {
+    TOTAL: monitoringStudents.length,
+    ACTIVE: monitoringStudents.filter(row => row.status === 'ACTIVE').length,
+    NEEDS_ATTENTION: monitoringStudents.filter(row => row.status === 'NEEDS_ATTENTION').length,
+    SUSPENDED: monitoringStudents.filter(row => row.status === 'SUSPENDED').length,
+    SUBMITTED: monitoringStudents.filter(row => row.status === 'SUBMITTED').length,
+    OFFLINE: monitoringStudents.filter(row => row.status === 'OFFLINE').length,
+    HIGH_RISK: monitoringStudents.filter(row => row.risk === 'HIGH' || row.risk === 'CRITICAL').length,
+    FACULTY_REQUESTS: monitoringStudents.filter(row => row.assistance?.status === 'PENDING').length
+  };
+  const statusDistribution = [
+    ['NOT_STARTED', 'Not Started'],
+    ['ACTIVE', 'Active'],
+    ['NEEDS_ATTENTION', 'Needs Attention'],
+    ['SUSPENDED', 'Suspended'],
+    ['SUBMITTED', 'Submitted'],
+    ['OFFLINE', 'Offline']
+  ] as const;
+  const trendBuckets = Array.from({ length: 6 }, (_, index) => {
+    const end = monitoringNow - (5 - index) * 10 * 60 * 1000;
+    const start = end - 10 * 60 * 1000;
+    const count = proctoringEvents.filter(event => {
+      const timestamp = new Date(event.timestamp).getTime();
+      return event.examId === selectedMonitoringExamId && timestamp >= start && timestamp < end &&
+        event.eventType !== 'WINDOW_FOCUS' && event.eventType !== 'CAMERA_CONNECTED' &&
+        event.eventType !== 'FACE_DETECTED' && event.eventType !== 'FACE_STATUS';
+    }).length;
+    return { label: new Date(start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), count };
+  });
+  const maxTrendEvents = Math.max(1, ...trendBuckets.map(bucket => bucket.count));
+  const monitoringAlerts = attentionRows.map(row => {
+    const message = row.status === 'SUSPENDED'
+      ? `${row.studentName} reached ${row.warningCount}/5 warnings`
+      : row.status === 'OFFLINE'
+      ? `${row.studentName} is offline`
+      : row.lastEvent
+      ? `${row.studentName}: ${row.lastEvent.message || row.lastEvent.eventType}`
+      : `${row.studentName} needs attention`;
+    return {
+      ...row,
+      alertSeverity: row.status === 'OFFLINE' && row.risk === 'LOW' ? 'MEDIUM' : row.risk,
+      message
+    };
+  });
+  const monitoringExamStart = selectedMonitoringExam?.startAt
+    ? new Date(selectedMonitoringExam.startAt).getTime()
+    : NaN;
+  const monitoringExamEnd = selectedMonitoringExam?.endAt
+    ? new Date(selectedMonitoringExam.endAt).getTime()
+    : NaN;
+  const monitoringExamElapsedMinutes = Number.isFinite(monitoringExamStart)
+    ? Math.max(0, Math.floor((monitoringNow - monitoringExamStart) / 60000))
+    : null;
+  const monitoringExamRemainingMinutes = Number.isFinite(monitoringExamEnd)
+    ? Math.max(0, Math.ceil((monitoringExamEnd - monitoringNow) / 60000))
+    : null;
+  const applyMonitoringKpiFilter = (filter: string) => {
+    setMonitoringSearch('');
+    setMonitoringWarningsFilter('ALL');
+    setMonitoringConnectionFilter('ALL');
+    setMonitoringProgressFilter('ALL');
+    setMonitoringStatusFilter(filter === 'HIGH_RISK' || filter === 'FACULTY_REQUESTS' ? 'ALL' : filter);
+    setMonitoringRiskFilter(filter === 'HIGH_RISK' ? 'HIGH_RISK' : 'ALL');
+    setMonitoringAssistanceFilter(filter === 'FACULTY_REQUESTS' ? 'PENDING' : 'ALL');
+    setMonitoringPage(1);
+  };
+  const pendingAssistanceRequests = assistanceRequests
+    .filter(request => request.examId === selectedMonitoringExamId && request.status === 'PENDING')
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  const openMonitoringStudent = (studentId: string) => {
+    const attempt = monitoringExamAttempts.find(item => item.studentId === studentId);
+    if (attempt) setSelectedMonitoringAttempt(attempt);
+  };
+  const exportSelectedMonitoringStudents = () => {
+    const selectedRows = monitoringStudents.filter(row => selectedMonitoringStudentIds.has(row.studentId));
+    const csv = [
+      ['Student', 'Student ID', 'Exam', 'Status', 'Progress', 'Current Question', 'Risk', 'Warnings', 'Connection', 'Assistance'],
+      ...selectedRows.map(row => [
+        row.studentName,
+        row.studentId,
+        selectedMonitoringExam?.title || '',
+        row.status,
+        `${row.progress}%`,
+        row.currentQuestion ? `Q${row.currentQuestion}/${row.totalQuestions}` : '',
+        row.risk,
+        `${row.warningCount}/5`,
+        row.connection,
+        row.assistance?.status || 'NONE'
+      ])
+    ].map(line => line.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${selectedMonitoringExamId || 'exam'}-monitoring-selection.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="w-full max-w-[1440px] mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
@@ -1043,24 +1512,28 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               value={openQueriesCount}
               subValue={`${resolvedQueriesCount} Resolved`}
               icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-              onClick={() => onNavigateTab('queries')}
+              onClick={() => {
+                setQueryStatusFilter('PENDING');
+                onNavigateTab('queries');
+              }}
             />
-
             <KpiCard
-              label="Published Results"
-              value={publishedResultsCount}
+              label="Results"
+              value={results.length}
               subValue={`${unpublishedResultsCount} Pending publication`}
               icon={<CheckCircle className="w-5 h-5 text-teal-600 dark:text-teal-400" />}
               onClick={() => onNavigateTab('results')}
             />
-
             <KpiCard
-              label="Exam Monitoring"
-              value={proctoringEvents.length}
-              subValue={`${criticalEventsCount} Flagged events`}
+              label="High-Risk Students"
+              value={monitoringCounts.HIGH_RISK}
+              subValue="Open monitoring at high-risk filter"
               icon={<Shield className="w-5 h-5 text-rose-600 dark:text-rose-400" />}
               isLoading={isLoadingDirectory}
-              onClick={() => onNavigateTab('monitoring')}
+              onClick={() => {
+                setMonitoringRiskFilter('HIGH_RISK');
+                onNavigateTab('monitoring');
+              }}
             />
 
             {aiDrafts.length > 0 && (
@@ -1298,11 +1771,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         <TeacherExamScheduler
           exams={exams}
           questions={questions}
+          generationBatches={aiGenerationBatches}
           students={students}
           onSaveExam={onSaveExam}
           onDeleteExam={onDeleteExam}
-          onRefresh={onRefreshData}
-          onPublishExamResults={onPublishAllForExam}
+          onStatusChange={onStatusChange}
           onRequestGenerateQuestions={(ctx) => {
             setSavedExamDraft({
               formData: ctx.currentFormData,
@@ -1688,6 +2161,53 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       <p className="mt-1">Please select the matching subject or upload the correct syllabus.</p>
                     </div>
                   )}
+                  {extractedSyllabus.availableUnits?.length ? (
+                    <div className="border-t border-slate-100 pt-3 dark:border-slate-700">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="text-[13px] font-medium text-slate-700 dark:text-slate-200">
+                          Generate from
+                        </span>
+                        <button
+                          type="button"
+                          aria-pressed={selectedSyllabusUnits.length === 0}
+                          onClick={() => setSelectedSyllabusUnits([])}
+                          className={`rounded-md border px-2.5 py-1 text-[12.5px] ${selectedSyllabusUnits.length === 0 ? 'border-blue-600 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300' : 'border-slate-200 text-slate-600 dark:border-slate-600 dark:text-slate-300'}`}
+                        >
+                          All Units
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {extractedSyllabus.availableUnits.map((unit) => (
+                          <label key={unit} className="flex items-start gap-2 text-[12.5px] text-slate-600 dark:text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={selectedSyllabusUnits.length === 0 || selectedSyllabusUnits.includes(unit)}
+                              onChange={(event) => {
+                                if (selectedSyllabusUnits.length === 0) {
+                                  if (!event.target.checked) {
+                                    setSelectedSyllabusUnits(extractedSyllabus.availableUnits!.filter((item) => item !== unit));
+                                  }
+                                  return;
+                                }
+                                const next = event.target.checked
+                                  ? [...selectedSyllabusUnits, unit]
+                                  : selectedSyllabusUnits.filter((item) => item !== unit);
+                                setSelectedSyllabusUnits(
+                                  next.length === extractedSyllabus.availableUnits!.length ? [] : next
+                                );
+                              }}
+                              className="mt-0.5"
+                            />
+                            <span>{unit}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="border-t border-slate-100 pt-3 text-[12.5px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                      No explicit unit headings were detected. All extracted syllabus content will be used.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -1705,6 +2225,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   onChange={value => {
                     setAiTopic(value);
                     setExtractedSyllabus(null);
+                    setSelectedSyllabusUnits([]);
                   }}
                   onError={setAiError}
                   required
@@ -1719,6 +2240,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   onChange={e => {
                     setAiCourse(e.target.value);
                     setExtractedSyllabus(null);
+                    setSelectedSyllabusUnits([]);
                   }}
                   className="w-full h-12 px-3.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-[15px] text-slate-900 dark:text-white"
                 >
@@ -1735,6 +2257,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   onChange={e => {
                     setAiSemester(e.target.value);
                     setExtractedSyllabus(null);
+                    setSelectedSyllabusUnits([]);
                   }}
                   className="w-full h-12 px-3.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-[15px] text-slate-900 dark:text-white"
                 >
@@ -1744,7 +2267,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </div>
               <div>
                 <label className="block text-[14px] font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                  Topic / Focus Unit
+                  Topic / Subtopic
                 </label>
                 <input
                   type="text"
@@ -1977,96 +2500,427 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
       {/* 6. EXAM MONITORING (PROCTORING) TAB */}
       {activeTab === 'monitoring' && (
-        <div className="space-y-6">
-          {/* Proctoring KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <KpiCard
-              label="Active Attempts"
-              value={activeAttemptsCount}
-              subValue="Live candidate sessions"
-              icon={<Shield className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-              isLoading={isLoadingDirectory}
-            />
-            <KpiCard
-              label="Warning Events"
-              value={proctoringEvents.length}
-              subValue={`${criticalEventsCount} Critical / High alerts`}
-              icon={<Shield className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
-              isLoading={isLoadingDirectory}
-            />
-            <KpiCard
-              label="Blocked Attempts"
-              value={blockedAttemptsCount}
-              subValue="Terminated policy violations"
-              icon={<Shield className="w-5 h-5 text-rose-600 dark:text-rose-400" />}
-              isLoading={isLoadingDirectory}
-            />
-            <KpiCard
-              label="Submitted Attempts"
-              value={submittedAttemptsCount}
-              subValue="Finalized candidate submissions"
-              icon={<CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
-              isLoading={isLoadingDirectory}
-            />
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Exam Monitoring ({proctoringEvents.length})
-              </h2>
+        <div className="space-y-5">
+          <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  {selectedMonitoringExam?.status === 'LIVE' && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-bold tracking-wide text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" /> LIVE
+                    </span>
+                  )}
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+                    {selectedMonitoringExam?.title || 'Live Exam Command Center'}
+                  </h2>
+                  {selectedMonitoringExam && (
+                    <span className="rounded-md bg-slate-100 px-2 py-1 font-mono text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                      {selectedMonitoringExam.subject || selectedMonitoringExam.course}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                  <span className="font-mono">{selectedMonitoringExamId || 'No active exam selected'}</span>
+                  <span>{monitoringCounts.TOTAL} assigned students</span>
+                  {selectedMonitoringExam?.durationMinutes ? <span>{selectedMonitoringExam.durationMinutes} min exam</span> : null}
+                  {selectedMonitoringExam?.status === 'LIVE' && monitoringExamElapsedMinutes !== null
+                    ? <span>Elapsed {monitoringExamElapsedMinutes} min</span>
+                    : null}
+                  {selectedMonitoringExam?.status === 'LIVE' && monitoringExamRemainingMinutes !== null
+                    ? <span>{monitoringExamRemainingMinutes} min remaining</span>
+                    : null}
+                  {monitoringLastUpdated && <span>Updated {monitoringLastUpdated.toLocaleTimeString()}</span>}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {monitoringExams.length > 1 && (
+                  <label className="sr-only" htmlFor="monitoring-exam-select">Select exam</label>
+                )}
+                {monitoringExams.length > 0 && (
+                  <select
+                    id="monitoring-exam-select"
+                    value={selectedMonitoringExamId}
+                    onChange={event => {
+                      setMonitoringExamId(event.target.value);
+                      setMonitoringPage(1);
+                    }}
+                    className="h-9 max-w-[260px] rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                    aria-label="Select exam to monitor"
+                  >
+                    {monitoringExams.map(exam => (
+                      <option key={exam.examId || exam.id} value={exam.examId || exam.id}>
+                        {exam.title} · {exam.examId || exam.id}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <span className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold ${monitoringRealtimeConnected ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'}`}>
+                  {monitoringRealtimeConnected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+                  {monitoringRealtimeConnected ? 'Live connection' : 'Reconnecting'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void loadTeacherData()}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-[13px] text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" /> Refresh
+                </button>
+              </div>
             </div>
+          </section>
 
-          {proctoringEvents.length === 0 ? (
-            <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No proctoring records available.
+          {!selectedMonitoringExam ? (
+            <div className="rounded-xl border border-slate-200 bg-white py-14 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
+              No active students
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
-                    <th className="p-3.5">Session ID</th>
-                    <th className="p-3.5">Student</th>
-                    <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Violations</th>
-                    <th className="p-3.5">Risk Status</th>
-                    <th className="p-3.5">Timestamp</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {proctoringEvents.map(ev => (
-                    <tr
-                      key={ev.eventId}
-                      onClick={() => setSelectedProctoringDetail(ev)}
-                      className="hover:bg-slate-50 dark:hover:bg-slate-700/30 cursor-pointer transition-colors"
-                    >
-                      <td className="p-3.5 font-mono text-[14px] font-medium text-blue-600 dark:text-blue-400 tabular-nums">
-                        {ev.eventId}
-                      </td>
-                      <td className="p-3.5 font-mono text-[14px] font-medium text-slate-900 dark:text-white tabular-nums">
-                        {ev.studentId}
-                      </td>
-                      <td className="p-3.5 font-mono text-[14px] text-slate-600 dark:text-slate-300 tabular-nums">
-                        {ev.examId}
-                      </td>
-                      <td className="p-3.5 font-medium text-slate-800 dark:text-slate-200">
-                        <div>{ev.eventType}</div>
-                        <div className="text-[13px] font-normal text-slate-500">{ev.message}</div>
-                      </td>
-                      <td className="p-3.5 text-[13px] font-medium text-slate-700 dark:text-slate-300">
-                        {ev.severity}
-                      </td>
-                      <td className="p-3.5 text-[14px] text-slate-500 tabular-nums">
-                        {new Date(ev.timestamp).toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
+                {([
+                  ['TOTAL', 'Total students', 'text-slate-900 dark:text-white', 'ALL'],
+                  ['ACTIVE', 'Active', 'text-blue-700 dark:text-blue-300', 'ACTIVE'],
+                  ['NEEDS_ATTENTION', 'Needs attention', 'text-amber-700 dark:text-amber-300', 'NEEDS_ATTENTION'],
+                  ['SUSPENDED', 'Suspended', 'text-rose-700 dark:text-rose-300', 'SUSPENDED'],
+                  ['SUBMITTED', 'Submitted', 'text-emerald-700 dark:text-emerald-300', 'SUBMITTED'],
+                  ['OFFLINE', 'Offline', 'text-orange-700 dark:text-orange-300', 'OFFLINE'],
+                  ['HIGH_RISK', 'High risk', 'text-red-700 dark:text-red-300', 'HIGH_RISK'],
+                  ['FACULTY_REQUESTS', 'Faculty requests', 'text-indigo-700 dark:text-indigo-300', 'FACULTY_REQUESTS']
+                ] as const).map(([key, label, color, filter]) => (
+                  <button
+                    type="button"
+                    key={key}
+                    onClick={() => applyMonitoringKpiFilter(filter)}
+                    className="rounded-lg border border-slate-200 bg-white p-3 text-left transition-colors hover:border-blue-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-700 dark:hover:bg-slate-800/80"
+                  >
+                    <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</span>
+                    <span className={`mt-1 block text-xl font-semibold tabular-nums ${color}`}>
+                      {monitoringCounts[key]}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.3fr_1fr_1fr]">
+                <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                  <h3 className="mb-3 text-sm font-semibold text-slate-900 dark:text-white">Exam status distribution</h3>
+                  <div className="flex h-3 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700" role="group" aria-label="Filter students by status">
+                    {statusDistribution.map(([status, label]) => {
+                      const count = monitoringStudents.filter(row => row.status === status).length;
+                      const width = monitoringCounts.TOTAL ? (count / monitoringCounts.TOTAL) * 100 : 0;
+                      const colors: Record<string, string> = {
+                        NOT_STARTED: 'bg-slate-300', ACTIVE: 'bg-blue-500', NEEDS_ATTENTION: 'bg-amber-500',
+                        SUSPENDED: 'bg-rose-600', SUBMITTED: 'bg-emerald-500', OFFLINE: 'bg-orange-500'
+                      };
+                      return width > 0 ? (
+                        <button
+                          type="button"
+                          key={status}
+                          title={`${label}: ${count}`}
+                          aria-label={`Filter ${label}: ${count} students`}
+                          onClick={() => { setMonitoringStatusFilter(status); setMonitoringPage(1); }}
+                          className={`${colors[status]} h-full hover:brightness-90`}
+                          style={{ width: `${width}%` }}
+                        />
+                      ) : null;
+                    })}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
+                    {statusDistribution.map(([status, label]) => {
+                      const count = monitoringStudents.filter(row => row.status === status).length;
+                      return (
+                        <button
+                          type="button"
+                          key={status}
+                          onClick={() => { setMonitoringStatusFilter(status); setMonitoringPage(1); }}
+                          className="inline-flex items-center gap-1.5 text-xs text-slate-600 hover:text-blue-700 dark:text-slate-300 dark:hover:text-blue-300"
+                        >
+                          <span className={`h-2 w-2 rounded-full ${status === 'ACTIVE' ? 'bg-blue-500' : status === 'NEEDS_ATTENTION' ? 'bg-amber-500' : status === 'SUSPENDED' ? 'bg-rose-600' : status === 'SUBMITTED' ? 'bg-emerald-500' : status === 'OFFLINE' ? 'bg-orange-500' : 'bg-slate-400'}`} />
+                          {label} <span className="font-semibold tabular-nums">{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                  <h3 className="mb-3 text-sm font-semibold text-slate-900 dark:text-white">Risk overview</h3>
+                  <div className="space-y-2.5">
+                    {(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const).map(level => {
+                      const count = riskCounts[level];
+                      const percent = studentsWithRiskData ? Math.round((count / studentsWithRiskData) * 100) : 0;
+                      return (
+                        <button
+                          type="button"
+                          key={level}
+                          onClick={() => { setMonitoringRiskFilter(level); setMonitoringPage(1); }}
+                          className="grid w-full grid-cols-[70px_1fr_32px_38px] items-center gap-2 text-left text-xs"
+                        >
+                          <span className={`font-semibold ${level === 'CRITICAL' || level === 'HIGH' ? 'text-rose-700 dark:text-rose-300' : level === 'MEDIUM' ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}`}>{level}</span>
+                          <span className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
+                            <span className={`block h-full rounded-full ${level === 'CRITICAL' || level === 'HIGH' ? 'bg-rose-500' : level === 'MEDIUM' ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${percent}%` }} />
+                          </span>
+                          <span className="text-right font-semibold tabular-nums text-slate-700 dark:text-slate-200">{count}</span>
+                          <span className="text-right tabular-nums text-slate-500">{percent}%</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                    {monitoringCounts.HIGH_RISK} {monitoringCounts.HIGH_RISK === 1 ? 'student requires' : 'students require'} immediate attention.
+                  </p>
+                </section>
+
+                <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                  <h3 className="mb-3 text-sm font-semibold text-slate-900 dark:text-white">Proctoring activity · last hour</h3>
+                  {trendBuckets.every(bucket => bucket.count === 0) ? (
+                    <p className="py-5 text-center text-xs text-slate-500 dark:text-slate-400">No recent proctoring events.</p>
+                  ) : (
+                    <div className="flex h-20 items-end gap-2">
+                      {trendBuckets.map(bucket => (
+                        <div key={bucket.label} className="flex min-w-0 flex-1 flex-col items-center gap-1" title={`${bucket.label}: ${bucket.count} events`}>
+                          <span className="text-[10px] tabular-nums text-slate-500">{bucket.count || ''}</span>
+                          <div className="flex h-12 w-full items-end rounded-sm bg-slate-50 dark:bg-slate-900/60">
+                            <div className="w-full rounded-sm bg-blue-500" style={{ height: `${bucket.count ? Math.max(8, (bucket.count / maxTrendEvents) * 100) : 0}%` }} />
+                          </div>
+                          <span className="truncate text-[9px] text-slate-400">{bucket.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              <section className="rounded-xl border border-amber-200 bg-amber-50/60 p-4 dark:border-amber-900/60 dark:bg-amber-950/20">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Faculty assistance queue</h3>
+                  <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800 dark:bg-amber-900/60 dark:text-amber-200">{pendingAssistanceRequests.length} pending</span>
+                </div>
+                {pendingAssistanceRequests.length === 0 ? (
+                  <p className="text-sm text-slate-600 dark:text-slate-300">No pending assistance requests</p>
+                ) : (
+                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {pendingAssistanceRequests.slice(0, 6).map(request => {
+                      const attempt = attempts.find(item => item.attemptId === request.attemptId);
+                      return (
+                        <div key={request.requestId} className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-white p-3 dark:border-amber-900 dark:bg-slate-900">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{request.studentName}</p>
+                            <p className="truncate font-mono text-[11px] text-slate-500">{request.studentId} · {request.warningCount}/5 warnings</p>
+                            <p className="mt-0.5 truncate text-xs text-slate-500">{request.reason}</p>
+                          </div>
+                          <div className="flex shrink-0 gap-1.5">
+                            {attempt && <button type="button" onClick={() => setSelectedMonitoringAttempt(attempt)} className="rounded-md border border-slate-200 px-2 py-1.5 text-xs hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">Review</button>}
+                            <button type="button" onClick={() => void handleAssistanceReview(request.requestId, 'APPROVED')} className="rounded-md bg-emerald-600 px-2 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700">Approve</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+              <details className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-800 dark:text-slate-200">
+                  Assistance history ({assistanceRequests.filter(request => request.examId === selectedMonitoringExamId && request.status !== 'PENDING').length})
+                </summary>
+                <div className="mt-3 divide-y divide-slate-100 dark:divide-slate-700">
+                  {assistanceRequests
+                    .filter(request => request.examId === selectedMonitoringExamId && request.status !== 'PENDING')
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                    .slice(0, 10)
+                    .map(request => (
+                      <div key={request.requestId} className="flex flex-wrap items-start justify-between gap-3 py-3 text-xs">
+                        <div><p className="font-medium text-slate-800 dark:text-slate-200">{request.studentName} · {request.studentId}</p><p className="mt-1 text-slate-500">{request.reason}</p>{request.remarks && <p className="mt-1 text-slate-500">Review note: {request.remarks}</p>}</div>
+                        <span className="font-semibold text-slate-600 dark:text-slate-300">{request.status} · {new Date(request.createdAt).toLocaleString()}</span>
+                      </div>
+                    ))}
+                </div>
+              </details>
+
+              <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                <h3 className="mb-2 text-sm font-semibold text-slate-900 dark:text-white">Alert center</h3>
+                {monitoringAlerts.length === 0 ? (
+                  <p className="text-sm text-slate-500 dark:text-slate-400">All students are currently within normal monitoring limits.</p>
+                ) : (
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {monitoringAlerts.slice(0, 8).map(row => (
+                      <button
+                        type="button"
+                        key={row.studentId}
+                        onClick={() => openMonitoringStudent(row.studentId)}
+                        className={`min-w-[210px] rounded-lg border px-3 py-2 text-left text-xs ${row.alertSeverity === 'CRITICAL' ? 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200' : row.alertSeverity === 'HIGH' ? 'border-orange-200 bg-orange-50 text-orange-800 dark:border-orange-900 dark:bg-orange-950/30 dark:text-orange-200' : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200'}`}
+                      >
+                        <span className="font-bold">{row.alertSeverity}</span>
+                        <span className="mt-1 block truncate">{row.message}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+                <div className="border-b border-slate-200 p-4 dark:border-slate-700">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900 dark:text-white">Needs Attention</h3>
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{attentionRows.length} students need review</p>
+                    </div>
+                  </div>
+                </div>
+                {attentionRows.length === 0 ? (
+                  <p className="p-5 text-sm text-slate-500 dark:text-slate-400">All students are currently within normal monitoring limits.</p>
+                ) : (
+                  <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                    {attentionRows.slice(0, 6).map(row => (
+                      <div key={row.studentId} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{row.studentName} <span className="ml-1 font-mono text-xs font-normal text-slate-500">{row.studentId}</span></p>
+                          <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
+                            {row.currentQuestion ? `Question ${row.currentQuestion}/${row.totalQuestions} · ${row.progress}% complete` : row.status}
+                            {row.lastEvent && ` · ${row.lastEvent.message || row.lastEvent.eventType} · ${Math.max(0, Math.floor((monitoringNow - new Date(row.lastEvent.timestamp).getTime()) / 1000))}s ago`}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-700 dark:bg-slate-700 dark:text-slate-200">{row.risk}</span>
+                          <span className="text-xs tabular-nums text-slate-600 dark:text-slate-300">{row.warningCount}/5</span>
+                          <button type="button" onClick={() => openMonitoringStudent(row.studentId)} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/40">Open student</button>
+                          {row.assistance?.status === 'PENDING' && <button type="button" onClick={() => void handleAssistanceReview(row.assistance!.requestId, 'APPROVED')} className="rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700">Assist</button>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
+                <div className="space-y-3 border-b border-slate-200 p-4 dark:border-slate-700">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900 dark:text-white">Students</h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">One live row per assigned student</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="relative">
+                        <span className="sr-only">Search student by name or ID</span>
+                        <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                        <input value={monitoringSearch} onChange={event => { setMonitoringSearch(event.target.value); setMonitoringPage(1); }} placeholder="Search student / ID" className="h-9 w-48 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-xs text-slate-800 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={selectedMonitoringStudentIds.size === 0}
+                        onClick={exportSelectedMonitoringStudents}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                      >
+                        <Download className="h-3.5 w-3.5" /> Export selected
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!monitoringStudents.some(row => selectedMonitoringStudentIds.has(row.studentId) && row.attempt)}
+                        onClick={() => {
+                          const selectedRow = monitoringStudents.find(row => selectedMonitoringStudentIds.has(row.studentId) && row.attempt);
+                          if (selectedRow?.attempt) setSelectedMonitoringAttempt(selectedRow.attempt);
+                        }}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                      >
+                        View selected
+                      </button>
+                      {selectedMonitoringStudentIds.size > 0 && (
+                        <button type="button" onClick={() => setSelectedMonitoringStudentIds(new Set())} className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">
+                          <X className="h-3.5 w-3.5" /> Clear ({selectedMonitoringStudentIds.size})
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8">
+                    {[
+                      ['Status', monitoringStatusFilter, setMonitoringStatusFilter, ['ALL', 'ACTIVE', 'NEEDS_ATTENTION', 'SUSPENDED', 'SUBMITTED', 'OFFLINE', 'NOT_STARTED']],
+                      ['Risk', monitoringRiskFilter, setMonitoringRiskFilter, ['ALL', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'HIGH_RISK']],
+                      ['Warnings', monitoringWarningsFilter, setMonitoringWarningsFilter, ['ALL', '0', '1-2', '3-4', '5']],
+                      ['Connection', monitoringConnectionFilter, setMonitoringConnectionFilter, ['ALL', 'ONLINE', 'OFFLINE']],
+                      ['Progress', monitoringProgressFilter, setMonitoringProgressFilter, ['ALL', 'NOT_STARTED', 'IN_PROGRESS', 'ALMOST_FINISHED', 'SUBMITTED']],
+                      ['Assistance', monitoringAssistanceFilter, setMonitoringAssistanceFilter, ['ALL', 'NONE', 'PENDING', 'APPROVED', 'REJECTED']]
+                    ].map(([label, value, setter, options]) => (
+                      <label key={String(label)} className="min-w-0">
+                        <span className="sr-only">{String(label)} filter</span>
+                        <select
+                          value={String(value)}
+                          onChange={event => {
+                            (setter as (value: string) => void)(event.target.value);
+                            setMonitoringPage(1);
+                          }}
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                        >
+                          {(options as string[]).map(option => <option key={option} value={option}>{option === 'ALL' ? `${label}: All` : option.replaceAll('_', ' ')}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                    <label className="min-w-0">
+                      <span className="sr-only">Sort students</span>
+                      <select value={monitoringSort} onChange={event => setMonitoringSort(event.target.value)} className="h-9 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                        <option value="RISK">Sort: Risk</option>
+                        <option value="WARNINGS">Sort: Warnings</option>
+                        <option value="LAST_ACTIVITY">Sort: Last activity</option>
+                        <option value="PROGRESS">Sort: Progress</option>
+                        <option value="TIME">Sort: Time remaining</option>
+                        <option value="NAME">Sort: Student name</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                {monitoringStudents.length === 0 ? (
+                  <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">No active students</div>
+                ) : filteredMonitoringStudents.length === 0 ? (
+                  <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">No students match the selected filters.</div>
+                ) : (
+                  <>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[1120px] border-collapse text-left">
+                        <thead>
+                          <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-400">
+                            <th className="p-3"><input type="checkbox" aria-label="Select page students" checked={pagedMonitoringStudents.length > 0 && pagedMonitoringStudents.every(row => selectedMonitoringStudentIds.has(row.studentId))} onChange={event => setSelectedMonitoringStudentIds(previous => { const next = new Set(previous); pagedMonitoringStudents.forEach(row => event.target.checked ? next.add(row.studentId) : next.delete(row.studentId)); return next; })} /></th>
+                            <th className="p-3">Student</th><th className="p-3">Status</th><th className="p-3">Progress</th><th className="p-3">Current question</th><th className="p-3">Time left</th><th className="p-3">Risk</th><th className="p-3">Warnings</th><th className="p-3">Connection</th><th className="p-3">Last activity</th><th className="p-3 text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-xs text-slate-700 dark:divide-slate-700 dark:text-slate-300">
+                          {pagedMonitoringStudents.map(row => (
+                            <tr key={row.studentId} className="hover:bg-slate-50 dark:hover:bg-slate-900/40">
+                              <td className="p-3"><input type="checkbox" aria-label={`Select ${row.studentName}`} checked={selectedMonitoringStudentIds.has(row.studentId)} onChange={event => setSelectedMonitoringStudentIds(previous => { const next = new Set(previous); event.target.checked ? next.add(row.studentId) : next.delete(row.studentId); return next; })} /></td>
+                              <td className="p-3"><div className="max-w-[170px] truncate font-semibold text-slate-900 dark:text-white">{row.studentName}</div><div className="font-mono text-[10px] text-slate-500">{row.studentId}</div></td>
+                              <td className="p-3"><span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold dark:bg-slate-700">{row.status.replaceAll('_', ' ')}</span></td>
+                              <td className="p-3 tabular-nums">{row.answered}/{row.totalQuestions} · {row.progress}%</td>
+                              <td className="p-3 tabular-nums">{row.currentQuestion ? `Q${row.currentQuestion}/${row.totalQuestions}` : '—'}</td>
+                              <td className="p-3 font-mono tabular-nums">{row.attempt && row.attempt.status === 'IN_PROGRESS' ? `${Math.floor(row.remainingSeconds / 60)}:${String(row.remainingSeconds % 60).padStart(2, '0')}` : '—'}</td>
+                              <td className={`p-3 font-semibold ${row.risk === 'CRITICAL' || row.risk === 'HIGH' ? 'text-rose-600 dark:text-rose-300' : row.risk === 'MEDIUM' ? 'text-amber-600 dark:text-amber-300' : row.risk === 'LOW' ? 'text-emerald-600 dark:text-emerald-300' : 'text-slate-400'}`}>{row.risk}</td>
+                              <td className="p-3 tabular-nums">{row.warningCount}/5</td>
+                              <td className={`p-3 ${row.connection === 'ONLINE' ? 'text-emerald-600 dark:text-emerald-300' : row.connection === 'OFFLINE' ? 'text-rose-600 dark:text-rose-300' : 'text-slate-400'}`}>{row.connection}</td>
+                              <td className="p-3">{row.lastActivityAt ? `${Math.floor(Math.max(0, monitoringNow - new Date(row.lastActivityAt).getTime()) / 1000)}s ago` : '—'}</td>
+                              <td className="p-3 text-right"><button type="button" disabled={!row.attempt} onClick={() => openMonitoringStudent(row.studentId)} className="rounded-md border border-blue-200 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-40 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/40">View</button></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700">
+                      <span className="text-slate-500">Showing {(currentMonitoringPage - 1) * monitoringPageSize + 1}–{Math.min(currentMonitoringPage * monitoringPageSize, filteredMonitoringStudents.length)} of {filteredMonitoringStudents.length} students</span>
+                      <div className="flex items-center gap-2">
+                        <label className="text-slate-500">Rows
+                          <select value={monitoringPageSize} onChange={event => { setMonitoringPageSize(Number(event.target.value)); setMonitoringPage(1); }} className="ml-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                            {[25, 50, 100].map(size => <option key={size}>{size}</option>)}
+                          </select>
+                        </label>
+                        <button type="button" aria-label="Previous page" disabled={currentMonitoringPage <= 1} onClick={() => setMonitoringPage(page => Math.max(1, page - 1))} className="rounded-md border border-slate-200 p-1.5 disabled:opacity-40 dark:border-slate-700"><ChevronLeft className="h-4 w-4" /></button>
+                        {visibleMonitoringPages.map(page => (
+                          <button key={page} type="button" aria-current={currentMonitoringPage === page ? 'page' : undefined} onClick={() => setMonitoringPage(page)} className={`min-w-7 rounded-md px-2 py-1.5 tabular-nums ${currentMonitoringPage === page ? 'bg-blue-600 font-semibold text-white' : 'border border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700'}`}>
+                            {page}
+                          </button>
+                        ))}
+                        <button type="button" aria-label="Next page" disabled={currentMonitoringPage >= monitoringPageCount} onClick={() => setMonitoringPage(page => Math.min(monitoringPageCount, page + 1))} className="rounded-md border border-slate-200 p-1.5 disabled:opacity-40 dark:border-slate-700"><ChevronRight className="h-4 w-4" /></button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </section>
+            </>
           )}
-        </div>
         </div>
       )}
 
@@ -2251,12 +3105,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Queries ({queries.length})
+                Queries ({visibleQueries.length})
               </h2>
+              <select
+                aria-label="Filter queries by status"
+                value={queryStatusFilter}
+                onChange={event => setQueryStatusFilter(event.target.value as typeof queryStatusFilter)}
+                className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <option value="ALL">All statuses</option>
+                <option value="PENDING">Pending / in review</option>
+                <option value="RESOLVED">Resolved</option>
+              </select>
             </div>
-          {queries.length === 0 ? (
+          {visibleQueries.length === 0 ? (
             <div className="py-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No queries available.
+              {queries.length ? 'No queries match this filter.' : 'No queries available.'}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -2264,16 +3128,17 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
                     <th className="p-3.5">Query ID</th>
-                    <th className="p-3.5">Student</th>
+                    <th className="p-3.5">Student / Student ID</th>
                     <th className="p-3.5">Exam</th>
-                    <th className="p-3.5">Assigned To</th>
+                    <th className="p-3.5">Question #</th>
+                    <th className="p-3.5">Issue</th>
                     <th className="p-3.5">Status</th>
                     <th className="p-3.5">Created</th>
-                    <th className="p-3.5 text-right">Actions</th>
+                    <th className="p-3.5 text-right">Review</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {queries.map(q => {
+                  {visibleQueries.map(q => {
                     const qKey = q.queryId || q.id;
                     return (
                       <tr key={qKey} className="hover:bg-slate-50 dark:hover:bg-slate-700/30">
@@ -2293,17 +3158,33 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                           <div className="text-[13px] font-mono text-slate-500 tabular-nums">{q.studentId}</div>
                         </td>
                         <td className="p-3.5 text-slate-700 dark:text-slate-300">
-                          <div>{q.examTitle || q.subject || q.topic}</div>
-                          <div className="text-[13px] text-slate-500 line-clamp-1 max-w-xs">{q.question}</div>
+                          <div>{q.examTitle || q.examId}</div>
+                          <div className="font-mono text-[12px] text-slate-500">{q.examId}</div>
                         </td>
-                        <td className="p-3.5 text-[14px] text-slate-600 dark:text-slate-300">
-                          {q.assignedTeacherId || user?.name || 'Assigned Faculty'}
+                        <td className="p-3.5 text-slate-600 dark:text-slate-300">
+                          {q.questionNumber || '—'}
+                        </td>
+                        <td className="p-3.5 text-[13px] text-slate-700 dark:text-slate-300">
+                          {({
+                            OUT_OF_SYLLABUS: 'Out of syllabus',
+                            INCORRECT_QUESTION: 'Incorrect question',
+                            TYPO_ERROR: 'Typo/error',
+                            INCORRECT_OPTIONS: 'Incorrect options',
+                            MULTIPLE_OPTIONS_CORRECT: 'Multiple options appear correct',
+                            QUESTION_UNCLEAR: 'Question unclear',
+                            TECHNICAL_ISSUE: 'Technical issue',
+                            OTHER: 'Other',
+                            AMBIGUOUS_QUESTION: 'Ambiguous question',
+                            INCORRECT_KEY: 'Incorrect answer key',
+                            EVALUATION_ERROR: 'Evaluation error',
+                            TECHNICAL_GLITCH: 'Technical glitch'
+                          } as Record<StudentQuery['reasonType'], string>)[q.reasonType] || q.reasonType}
                         </td>
                         <td className="p-3.5 text-[13px] font-medium text-slate-600 dark:text-slate-300">
                           {q.status}
                         </td>
                         <td className="p-3.5 text-[14px] text-slate-500 tabular-nums">
-                          {q.timestamp}
+                          {q.createdAt}
                         </td>
                         <td className="p-3.5 text-right whitespace-nowrap">
                           <div className="flex items-center justify-end gap-2">
@@ -2312,53 +3193,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                               onClick={() => setSelectedQueryDetail(q)}
                               className="h-9 px-3 rounded-lg border border-blue-200 dark:border-blue-800 text-[14px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
                             >
-                              View
+                              Review
                             </button>
-                            {q.status === 'OPEN' && (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="text"
-                                  placeholder="Write response..."
-                                  value={replyText[qKey] || ''}
-                                  onChange={e =>
-                                    setReplyText(prev => ({ ...prev, [qKey]: e.target.value }))
-                                  }
-                                  className="w-48 h-10 px-3 text-[14px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white outline-none"
-                                />
-                                <button
-                                  type="button"
-                                  disabled={submittingQueryId === qKey || !(replyText[qKey] || '').trim()}
-                                  onClick={() => {
-                                    const reply = (replyText[qKey] || '').trim();
-                                    if (!reply) return;
-                                    confirmAction({
-                                      title: 'Resolve Query',
-                                      subtitle: `Query ID: ${qKey}`,
-                                      message: `Are you sure you want to send this resolution to ${q.studentName || 'the student'}?`,
-                                      confirmLabel: 'Yes, Resolve',
-                                      cancelLabel: 'No',
-                                      variant: 'primary',
-                                      details: [
-                                        { label: 'Student', value: q.studentName },
-                                        { label: 'Subject', value: q.subject || q.topic || 'General' },
-                                        { label: 'Response', value: reply }
-                                      ],
-                                      action: async () => {
-                                        setSubmittingQueryId(qKey);
-                                        try {
-                                          await onResolveQuery(qKey, reply, 'RESOLVED');
-                                        } finally {
-                                          setSubmittingQueryId(null);
-                                        }
-                                      }
-                                    });
-                                  }}
-                                  className="h-10 px-3.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-[14px] font-medium"
-                                >
-                                  Resolve
-                                </button>
-                              </div>
-                            )}
                           </div>
                         </td>
                       </tr>
@@ -2390,36 +3226,42 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
       {/* 10. PROFILE TAB */}
       {activeTab === 'profile' && (
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 max-w-xl">
-          <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white mb-4 leading-snug">
-            Faculty Profile
-          </h2>
-          <div className="space-y-3 text-[15px]">
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Teacher ID</span>
-              <span className="font-mono font-medium text-slate-900 dark:text-white tabular-nums">
-                {user?.userId || user?.id}
-              </span>
+        <div className="space-y-5">
+          <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-indigo-100 text-lg font-bold text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-200">
+                {(user?.name || 'Faculty').split(/\s+/).map(part => part[0]).slice(0, 2).join('').toUpperCase()}
+              </div>
+              <div>
+                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">{user?.name || 'Faculty'}</h2>
+                <p className="mt-1 font-mono text-xs text-slate-500">{user?.userId || user?.id} · {user?.department || 'Faculty'}</p>
+                <div className="mt-2"><StatusBadge status={user?.status || 'ACTIVE'} /></div>
+              </div>
             </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Full Name</span>
-              <span className="font-medium text-slate-900 dark:text-white">{user?.name}</span>
-            </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Role</span>
-              <span className="font-medium text-slate-900 dark:text-white">{user?.role}</span>
-            </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Department</span>
-              <span className="font-medium text-slate-900 dark:text-white">
-                {user?.department || 'Computer Science'}
-              </span>
-            </div>
-            <div className="flex justify-between py-2.5">
-              <span className="text-slate-500">Supervised Students</span>
-              <span className="font-medium text-slate-900 dark:text-white tabular-nums">{students.length}</span>
-            </div>
-          </div>
+            <button type="button" onClick={() => void loadTeacherData()} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700">
+              <RefreshCw className="h-3.5 w-3.5" /> Refresh
+            </button>
+          </section>
+
+          <section className="max-w-2xl rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+              <h3 className="mb-4 text-base font-semibold text-slate-900 dark:text-white">Faculty information</h3>
+              <dl className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
+                {[
+                  ['Faculty ID', user?.userId || user?.id || '—'],
+                  ['Name', user?.name || '—'],
+                  ['Email', user?.email || '—'],
+                  ['Phone', user?.phone || '—'],
+                  ['Department', user?.department || '—'],
+                  ['Designation', user?.designation || '—'],
+                  ['Qualification', user?.qualification || '—']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex justify-between gap-4 py-2.5">
+                    <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
+                    <dd className="text-right font-medium text-slate-800 dark:text-slate-200">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+          </section>
         </div>
       )}
 
@@ -2878,133 +3720,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Exams Taken</div>
-                    <div className={`${getKpiPrimaryValueClass(selectedStudentDetails.kpis.examsTakenCount)} text-blue-600 dark:text-blue-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.examsTakenCount}
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Average Percentage</div>
-                    <div className={`${getKpiPrimaryValueClass(`${selectedStudentDetails.kpis.averagePercentage}%`)} text-emerald-600 dark:text-emerald-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.averagePercentage}%
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Published Results</div>
-                    <div className={`${getKpiPrimaryValueClass(selectedStudentDetails.kpis.publishedResultsCount)} text-indigo-600 dark:text-indigo-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.publishedResultsCount}
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Queries Raised</div>
-                    <div className={`${getKpiPrimaryValueClass(selectedStudentDetails.kpis.queriesCount)} text-amber-600 dark:text-amber-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.queriesCount}
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <h4 className="text-[15px] font-semibold text-slate-900 dark:text-white mb-2.5">
-                    Examination Results ({selectedStudentDetails.results.length})
-                  </h4>
-                  <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-                    <table className="w-full text-left border-collapse text-[14px]">
-                      <thead>
-                        <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 text-[13px] font-semibold">
-                          <th className="py-2.5 px-3.5">Subject</th>
-                          <th className="py-2.5 px-3.5">Score</th>
-                          <th className="py-2.5 px-3.5">Grade</th>
-                          <th className="py-2.5 px-3.5">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                        {selectedStudentDetails.results.map(r => (
-                          <tr key={r.id}>
-                            <td className="py-2.5 px-3.5 font-medium text-slate-900 dark:text-white">
-                              {r.subjectTitle}
-                            </td>
-                            <td className="py-2.5 px-3.5 font-semibold text-slate-800 dark:text-slate-200 tabular-nums">
-                              {r.score} / {r.totalMarks} ({r.percentage}%)
-                            </td>
-                            <td className="py-2.5 px-3.5 font-semibold text-blue-600 dark:text-blue-400">
-                              {r.grade}
-                            </td>
-                            <td className="py-2.5 px-3.5">
-                              <span
-                                className={`px-2 py-0.5 rounded-md text-[12.5px] font-medium ${
-                                  r.status === 'PUBLISHED'
-                                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-                                    : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-                                }`}
-                              >
-                                {r.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                        {selectedStudentDetails.results.length === 0 && (
-                          <tr>
-                            <td colSpan={4} className="py-5 text-center text-slate-400 text-[14px]">
-                              No examination results recorded for this student yet.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* Assigned Examinations Summary */}
-                <div>
-                  <h4 className="text-[15px] font-semibold text-slate-900 dark:text-white mb-2.5">
-                    Assigned Examinations ({selectedStudentDetails.recentExams?.length || 0})
-                  </h4>
-                  <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-                    <table className="w-full text-left border-collapse text-[14px]">
-                      <thead>
-                        <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 text-[13px] font-semibold">
-                          <th className="py-2.5 px-3.5">Exam Title</th>
-                          <th className="py-2.5 px-3.5">Subject</th>
-                          <th className="py-2.5 px-3.5">Duration</th>
-                          <th className="py-2.5 px-3.5">Total Marks</th>
-                          <th className="py-2.5 px-3.5">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                        {(selectedStudentDetails.recentExams || []).map(ex => (
-                          <tr key={ex.id}>
-                            <td className="py-2.5 px-3.5 font-medium text-slate-900 dark:text-white">
-                              {ex.title}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-600 dark:text-slate-300">
-                              {ex.subject}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-500 tabular-nums">
-                              {ex.durationMinutes} mins
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-600 dark:text-slate-300 tabular-nums">
-                              {ex.totalMarks}
-                            </td>
-                            <td className="py-2.5 px-3.5">
-                              <span className="px-2 py-0.5 rounded-md text-[12.5px] font-medium bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
-                                {ex.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                        {(!selectedStudentDetails.recentExams || selectedStudentDetails.recentExams.length === 0) && (
-                          <tr>
-                            <td colSpan={5} className="py-5 text-center text-slate-400 text-[14px]">
-                              No assigned examinations found for this student.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
               </div>
             )}
         </Modal>
@@ -3154,7 +3869,133 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       <QueryDetailModal
         query={selectedQueryDetail}
         onClose={() => setSelectedQueryDetail(null)}
+        onResolve={onResolveQueryDetailed}
       />
+
+      {selectedMonitoringAttempt && (
+        <div className="fixed inset-0 z-[80]">
+          <button type="button" aria-label="Close student monitoring details" onClick={() => setSelectedMonitoringAttempt(null)} className="absolute inset-0 bg-slate-950/50" />
+          {(() => {
+            const attempt =
+              attempts.find(item => item.attemptId === selectedMonitoringAttempt.attemptId) ||
+              selectedMonitoringAttempt;
+            const exam = exams.find(item => item.examId === attempt.examId);
+            const student = students.find(item => item.userId === attempt.studentId || item.id === attempt.studentId);
+            const events = proctoringEvents
+              .filter(event => event.attemptId === attempt.attemptId)
+              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+            const assistance = assistanceRequests
+              .filter(request => request.attemptId === attempt.attemptId)
+              .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+            const relatedQuery = queries.find(query => query.attemptId === attempt.attemptId);
+            const totalQuestions = exam?.questionCount || exam?.questionIds?.length || attempt.answers.length;
+            const answeredCount = attempt.answers.filter(answer => answer.selectedOption).length;
+            const lastViolation = events.find(event =>
+              !['WINDOW_FOCUS', 'CAMERA_CONNECTED', 'FACE_DETECTED', 'FACE_STATUS'].includes(event.eventType)
+            );
+            const remainingSeconds = attempt.status === 'IN_PROGRESS'
+              ? Math.max(0, Math.floor((new Date(attempt.expiresAt).getTime() - Date.now()) / 1000))
+              : 0;
+            return (
+              <aside role="dialog" aria-modal="true" aria-label="Individual student monitoring" className="absolute inset-y-0 right-0 flex w-full max-w-2xl flex-col border-l border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+                <header className="flex items-start justify-between gap-4 border-b border-slate-200 p-5 dark:border-slate-700">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white">{student?.name || attempt.studentName}</h2>
+                    <p className="mt-1 font-mono text-xs text-slate-500">{attempt.studentId} · {exam?.title || attempt.examId}</p>
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold dark:bg-slate-700">{attempt.suspended ? 'SUSPENDED' : attempt.status}</span>
+                      <span className={`rounded-full px-2 py-1 font-semibold ${attempt.suspended || attempt.warningCount >= 5 ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/50 dark:text-rose-200' : attempt.warningCount >= 3 ? 'bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-200' : attempt.warningCount ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-200' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200'}`}>
+                        {attempt.suspended || attempt.warningCount >= 5 ? 'CRITICAL' : attempt.warningCount >= 3 ? 'HIGH' : attempt.warningCount ? 'MEDIUM' : 'LOW'} risk
+                      </span>
+                    </div>
+                  </div>
+                  <button type="button" aria-label="Close student monitoring details" onClick={() => setSelectedMonitoringAttempt(null)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:hover:bg-slate-800"><X className="h-4 w-4" /></button>
+                </header>
+                <div className="flex-1 space-y-5 overflow-y-auto p-5">
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-slate-900 dark:text-white">Exam progress</h3>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {[
+                    ['Answered', `${answeredCount} / ${totalQuestions} · ${totalQuestions ? Math.round(answeredCount / totalQuestions * 100) : 0}%`],
+                    ['Current question', `${Math.min((attempt.currentQuestionIndex || 0) + 1, totalQuestions || 1)} / ${totalQuestions}`],
+                    ['Remaining time', `${Math.floor(remainingSeconds / 60)}m ${remainingSeconds % 60}s`],
+                    ['Warnings', `${attempt.warningCount} / 5`]
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+                      <div className="text-[11px] text-slate-500">{label}</div>
+                      <div className="mt-1 break-words text-[13px] font-medium text-slate-800 dark:text-slate-200">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                </div>
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-slate-900 dark:text-white">Proctoring status</h3>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {[
+                    ['Camera', attempt.cameraStatus || 'UNKNOWN'],
+                    ['Face', attempt.faceStatus || 'UNKNOWN'],
+                    ['Multiple faces', attempt.faceStatus === 'MULTIPLE' ? 'Detected' : 'No current detection'],
+                    ['Fullscreen', attempt.fullscreenActive ? 'Active' : 'Exited'],
+                    ['Connection', attempt.lastHeartbeatAt && Date.now() - new Date(attempt.lastHeartbeatAt).getTime() < 45000 ? 'Online' : 'Offline'],
+                    ['Last violation', lastViolation?.message || lastViolation?.eventType || 'None recorded']
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+                      <div className="text-[11px] text-slate-500">{label}</div>
+                      <div className="mt-1 break-words text-[13px] font-medium text-slate-800 dark:text-slate-200">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                </div>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div className="rounded-lg bg-slate-50 p-3 text-[13px] dark:bg-slate-900">
+                    Answered: {answeredCount}
+                  </div>
+                  <div className="rounded-lg bg-slate-50 p-3 text-[13px] dark:bg-slate-900">
+                    Flagged: {attempt.answers.filter(answer => answer.markedForReview).length}
+                  </div>
+                  <div className="rounded-lg bg-slate-50 p-3 text-[13px] dark:bg-slate-900">
+                    Reported: {attempt.reportedQuestionIds?.length || queries.filter(query => query.attemptId === attempt.attemptId).length}
+                  </div>
+                </div>
+                <section className="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Faculty assistance</h3>
+                  {assistance ? (
+                    <div className="mt-2 text-sm">
+                      <p className="font-medium text-slate-800 dark:text-slate-200">{assistance.status} · {assistance.warningCount}/5 warnings</p>
+                      <p className="mt-1 text-slate-600 dark:text-slate-400">{assistance.reason}</p>
+                      {assistance.remarks && <p className="mt-1 text-xs text-slate-500">Review note: {assistance.remarks}</p>}
+                      {assistance.status === 'PENDING' && (
+                        <div className="mt-3 flex gap-2">
+                          <button type="button" onClick={() => void handleAssistanceReview(assistance.requestId, 'REJECTED')} className="rounded-md border border-rose-200 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50 dark:border-rose-800 dark:text-rose-300">Reject and submit</button>
+                          <button type="button" onClick={() => void handleAssistanceReview(assistance.requestId, 'APPROVED')} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">Approve resume</button>
+                        </div>
+                      )}
+                    </div>
+                  ) : <p className="mt-2 text-sm text-slate-500">No assistance request for this attempt.</p>}
+                  {relatedQuery && <button type="button" onClick={() => { setSelectedMonitoringAttempt(null); setSelectedQueryDetail(relatedQuery); }} className="mt-3 rounded-md border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300">View reported question</button>}
+                </section>
+                <div>
+                  <h3 className="mb-2 text-[15px] font-semibold text-slate-900 dark:text-white">Event Timeline</h3>
+                  {events.length === 0 ? (
+                    <p className="rounded-lg bg-slate-50 p-4 text-[13px] text-slate-500 dark:bg-slate-900">No persisted events recorded for this attempt.</p>
+                  ) : (
+                    <ol className="max-h-72 space-y-2 overflow-y-auto">
+                      {events.map(event => (
+                        <li key={event.eventId} className="flex gap-3 rounded-lg border border-slate-200 p-3 text-[13px] dark:border-slate-700">
+                          <time className="shrink-0 text-slate-500">{new Date(event.timestamp).toLocaleString()}</time>
+                          <span className="font-semibold text-slate-800 dark:text-slate-200">{event.eventType}</span>
+                          <span className="text-slate-600 dark:text-slate-400">{event.details}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+                </div>
+              </aside>
+            );
+          })()}
+        </div>
+      )}
 
       <ProctoringDetailModal
         event={selectedProctoringDetail}

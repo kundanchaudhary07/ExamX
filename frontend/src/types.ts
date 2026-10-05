@@ -182,6 +182,7 @@ export interface SyllabusExtractData {
   semester?: string;
   subject?: string;
   uploadedAt?: string;
+  availableUnits?: string[];
   subjectCompatibility?: {
     compatible: boolean;
     selectedSubject: string;
@@ -218,6 +219,7 @@ export interface Question {
   correctOption?: 'A' | 'B' | 'C' | 'D';
   difficulty: Difficulty;
   topic: string;
+  selectedUnits?: string[];
   subject?: string;
   course?: string;
   semester?: string;
@@ -234,7 +236,7 @@ export interface Question {
   syllabusTopic?: string;
   sourceReference?: string;
   generationId?: string;
-  aiProvider?: 'GEMINI' | 'GROQ';
+  aiProvider?: 'GROQ';
   aiModel?: string;
   createdBy?: string;
   createdByName?: string;
@@ -255,7 +257,7 @@ export interface AiGenerationBatch {
   generatedCount: number;
   syllabusId: string;
   sourceFileName: string;
-  provider: 'GEMINI' | 'GROQ';
+  provider: 'GROQ';
   aiModel: string;
   generatedAt: string;
   pendingCount: number;
@@ -294,7 +296,13 @@ export interface ExamAttemptRecord {
   wrongCount: number;
   unansweredCount: number;
   warningCount: number;
-  proctoringStatus: 'CLEAN' | 'WARNED' | 'FLAGGED' | 'TERMINATED';
+  proctoringStatus: 'CLEAN' | 'WARNED' | 'FLAGGED' | 'SUSPENDED' | 'TERMINATED';
+  suspended?: boolean;
+  reportedQuestionIds?: string[];
+  cameraStatus?: 'ACTIVE' | 'OFFLINE' | 'UNKNOWN';
+  faceStatus?: 'DETECTED' | 'NOT_DETECTED' | 'MULTIPLE' | 'UNKNOWN';
+  fullscreenActive?: boolean;
+  lastHeartbeatAt?: string;
   terminationReason?: string;
   remainingSeconds?: number;
 }
@@ -308,6 +316,7 @@ export interface ResultAnswerBreakdown {
   isCorrect: boolean;
   marksAwarded: number;
   maxMarks: number;
+  excluded?: boolean;
   negativeMarks: number;
   topic: string;
   difficulty: string;
@@ -350,6 +359,20 @@ export interface StudentResult {
   answerBreakdown?: ResultAnswerBreakdown[];
 }
 
+export type QueryReasonType =
+  | 'AMBIGUOUS_QUESTION'
+  | 'INCORRECT_KEY'
+  | 'EVALUATION_ERROR'
+  | 'TECHNICAL_GLITCH'
+  | 'OTHER'
+  | 'INCORRECT_QUESTION'
+  | 'TYPO_ERROR'
+  | 'TECHNICAL_ISSUE'
+  | 'OUT_OF_SYLLABUS'
+  | 'INCORRECT_OPTIONS'
+  | 'MULTIPLE_OPTIONS_CORRECT'
+  | 'QUESTION_UNCLEAR';
+
 export interface StudentQuery {
   id: string;
   queryId: string;
@@ -362,11 +385,15 @@ export interface StudentQuery {
   attemptId?: string;
   resultId?: string;
   questionId?: string;
+  questionNumber?: number;
   questionText?: string;
+  options?: Array<{ id: string; text: string }>;
+  studentAnswer?: string;
+  assignedFacultyId?: string;
   question?: string;
   currentMarks?: number;
   maxMarks?: number;
-  reasonType: 'AMBIGUOUS_QUESTION' | 'INCORRECT_KEY' | 'EVALUATION_ERROR' | 'TECHNICAL_GLITCH' | 'OTHER';
+  reasonType: QueryReasonType;
   message?: string;
   description: string;
   status: 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESOLVED' | 'OPEN';
@@ -374,6 +401,15 @@ export interface StudentQuery {
   reply?: string;
   facultyComment?: string;
   scoreAdjustment?: number;
+  resolutionType?:
+    | 'VALID_QUESTION'
+    | 'OUT_OF_SYLLABUS'
+    | 'INVALID_QUESTION'
+    | 'CORRECT_ANSWER_CHANGED'
+    | 'GRACE_MARKS'
+    | 'EXCLUDE_QUESTION';
+  resolutionNotes?: string;
+  correctedAnswer?: string;
   resolvedBy?: string;
   resolvedByName?: string;
   resolvedAt?: string | null;
@@ -398,12 +434,34 @@ export interface ProctoringEventRecord {
     | 'LOOKING_AWAY'
     | 'COPY_PASTE_ATTEMPT'
     | 'WINDOW_BLUR'
+    | 'WINDOW_FOCUS'
+    | 'CAMERA_CONNECTED'
+    | 'FACE_DETECTED'
+    | 'FACE_STATUS'
     | 'OTHER';
   severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
   details: string;
   message?: string;
   warningCountAfter: number;
   timestamp: string;
+}
+
+export interface AssistanceRequestRecord {
+  requestId: string;
+  attemptId: string;
+  examId: string;
+  examTitle: string;
+  studentId: string;
+  studentName: string;
+  assignedFacultyId: string;
+  reason: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  warningCount: number;
+  reviewedBy?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  remarks?: string;
+  createdAt: string;
 }
 
 export interface ScheduledExam {

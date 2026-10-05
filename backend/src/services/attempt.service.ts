@@ -3,6 +3,8 @@ import { Question, IQuestionDocument } from '../models/Question';
 import { ExamAssignment } from '../models/ExamAssignment';
 import { ExamAttempt, IExamAttemptDocument, IAttemptAnswer } from '../models/ExamAttempt';
 import { Result, IResultDocument, IResultAnswerBreakdown } from '../models/Result';
+import { StudentQuery } from '../models/StudentQuery';
+import { User } from '../models/User';
 import { JwtUserPayload } from '../types/auth.types';
 import { generateNextAttemptId, generateNextResultId } from '../utils/exam-id.generator';
 import { AuditService } from './audit.service';
@@ -22,6 +24,51 @@ export interface SanitizedExamQuestionDto {
 }
 
 export class AttemptService {
+  private static sanitizeAttemptForStaff(attempt: IExamAttemptDocument) {
+    const safeAttempt = attempt.toJSON();
+    delete safeAttempt.deviceSessionId;
+    return safeAttempt;
+  }
+
+  private static assertDeviceOwnership(
+    attempt: IExamAttemptDocument,
+    user: JwtUserPayload,
+    deviceSessionId: string
+  ): void {
+    if (
+      user.role === 'STUDENT' &&
+      attempt.status === 'IN_PROGRESS' &&
+      (!deviceSessionId || attempt.deviceSessionId !== deviceSessionId)
+    ) {
+      const err: any = new Error('This examination attempt is active in another browser or device.');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+
+  private static sanitizeExamForStudent(exam: IExamDocument) {
+    return {
+      examId: exam.examId,
+      title: exam.title,
+      description: exam.description,
+      subject: exam.subject,
+      course: exam.course,
+      department: exam.department,
+      academicYear: exam.academicYear,
+      semester: exam.semester,
+      durationMinutes: exam.durationMinutes,
+      questionCount: exam.questionCount,
+      totalMarks: exam.totalMarks,
+      passingMarks: exam.passingMarks,
+      attemptLimit: exam.attemptLimit || 1,
+      strictMode: exam.strictMode,
+      instructions: exam.instructions,
+      status: exam.status,
+      startAt: exam.startAt || exam.startDateTime,
+      endAt: exam.endAt || exam.endDateTime
+    };
+  }
+
   /**
    * Strip correctOption, correctAnswer, and explanation so students can NEVER see answers during an exam
    */
@@ -45,10 +92,32 @@ export class AttemptService {
   static async evaluateAndCreateResult(
     attempt: IExamAttemptDocument,
     exam: IExamDocument,
-    rawAnswers: Array<{ questionId: string; selectedOption: string }>,
+    rawAnswers: Array<{ questionId: string; selectedOption: string; markedForReview?: boolean }>,
     finalAttemptStatus: 'SUBMITTED' | 'EXPIRED' | 'TERMINATED' | 'EVALUATED'
   ): Promise<{ attempt: IExamAttemptDocument; result: IResultDocument }> {
-    const questions = await Question.find({ questionId: { $in: exam.questions } });
+    const [questions, resolutions] = await Promise.all([
+      Question.find({ questionId: { $in: exam.questions } }),
+      StudentQuery.find({
+        attemptId: attempt.attemptId,
+        status: 'RESOLVED_ACCEPTED',
+        resolutionType: {
+          $in: ['OUT_OF_SYLLABUS', 'INVALID_QUESTION', 'CORRECT_ANSWER_CHANGED', 'GRACE_MARKS', 'EXCLUDE_QUESTION']
+        }
+      }).lean()
+    ]);
+    const excludedQuestionIds = new Set(
+      resolutions
+        .filter(query => ['OUT_OF_SYLLABUS', 'INVALID_QUESTION', 'EXCLUDE_QUESTION'].includes(query.resolutionType || ''))
+        .map(query => query.questionId)
+    );
+    const correctedAnswers = new Map(
+      resolutions
+        .filter(query => query.resolutionType === 'CORRECT_ANSWER_CHANGED' && query.questionId && query.correctedAnswer)
+        .map(query => [query.questionId!, query.correctedAnswer!])
+    );
+    const graceMarks = resolutions
+      .filter(query => query.resolutionType === 'GRACE_MARKS')
+      .reduce((sum, query) => sum + (query.scoreAdjustment || 0), 0);
     const questionMap = new Map<string, IQuestionDocument>();
     for (const q of questions) {
       questionMap.set(q.questionId, q);
@@ -75,12 +144,13 @@ export class AttemptService {
       questionMarksTotal += qMarks;
 
       const selectedOption = answerInputMap.get(qId) || '';
-      const canonicalCorrect = (q.correctOption || q.correctAnswer || '').trim();
+      const canonicalCorrect = (correctedAnswers.get(qId) || q.correctOption || q.correctAnswer || '').trim();
+      const excluded = excludedQuestionIds.has(qId);
 
       let isCorrect = false;
       let marksAwarded = 0;
 
-      if (selectedOption) {
+      if (!excluded && selectedOption) {
         if (selectedOption === canonicalCorrect) {
           isCorrect = true;
           marksAwarded = qMarks;
@@ -95,6 +165,7 @@ export class AttemptService {
       attemptAnswers.push({
         questionId: q.questionId,
         selectedOption,
+        markedForReview: Boolean(rawAnswers.find(answer => answer.questionId === qId)?.markedForReview),
         marksAwarded,
         isCorrect
       });
@@ -107,12 +178,19 @@ export class AttemptService {
         correctOption: canonicalCorrect,
         isCorrect,
         marksAwarded,
-        maxMarks: qMarks
+        maxMarks: excluded ? 0 : qMarks,
+        excluded,
+        negativeMarks: qNeg
       });
+      if (excluded) questionMarksTotal -= qMarks;
     }
 
-    const finalScore = finalAttemptStatus === 'TERMINATED' ? 0 : Math.max(0, Number(rawScore.toFixed(2)));
-    const effectiveTotalMarks = questionMarksTotal > 0 ? questionMarksTotal : exam.totalMarks;
+    rawScore += graceMarks;
+    const effectiveTotalMarks = questionMarksTotal;
+    const finalScore =
+      finalAttemptStatus === 'TERMINATED'
+        ? 0
+        : Math.min(effectiveTotalMarks, Math.max(0, Number(rawScore.toFixed(2))));
     const percentage =
       effectiveTotalMarks > 0 ? Number(((finalScore / effectiveTotalMarks) * 100).toFixed(2)) : 0;
 
@@ -186,16 +264,24 @@ export class AttemptService {
    */
   static async startAttempt(
     examId: string,
-    user: JwtUserPayload
+    user: JwtUserPayload,
+    deviceSessionId: string
   ): Promise<{
+    resumed: boolean;
     attempt: any;
     exam: any;
     questions: SanitizedExamQuestionDto[];
     remainingSeconds: number;
+    suspended?: boolean;
   }> {
     if (user.role !== 'STUDENT') {
       const err: any = new Error('Forbidden: Only students can start examination attempts');
       err.statusCode = 403;
+      throw err;
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deviceSessionId || '')) {
+      const err: any = new Error('A valid device session identifier is required');
+      err.statusCode = 400;
       throw err;
     }
 
@@ -245,39 +331,65 @@ export class AttemptService {
     }
 
     // 3. Check existing IN_PROGRESS attempt and validate server-side timer
-    const activeAttempt = await ExamAttempt.findOne({
-      examId,
+    let activeAttempt = await ExamAttempt.findOne({
       studentId: user.userId,
       status: 'IN_PROGRESS'
     });
 
     if (activeAttempt) {
       if (now.getTime() > activeAttempt.expiresAt.getTime()) {
-        // Auto-expire this attempt
-        await this.evaluateAndCreateResult(activeAttempt, exam, activeAttempt.answers || [], 'EXPIRED');
+        const activeExam = activeAttempt.examId === examId ? exam : await Exam.findOne({ examId: activeAttempt.examId });
+        if (!activeExam) {
+          const err: any = new Error('The active examination could not be loaded. Contact an administrator.');
+          err.statusCode = 409;
+          throw err;
+        }
+        await this.evaluateAndCreateResult(activeAttempt, activeExam, activeAttempt.answers || [], 'EXPIRED');
+        activeAttempt = null;
       } else {
+        if (activeAttempt.examId !== examId) {
+          const activeExam = await Exam.findOne({ examId: activeAttempt.examId }).select('title');
+          const err: any = new Error(
+            `You already have ${activeExam?.title || activeAttempt.examId} — In Progress (attempt ${activeAttempt.attemptId}). Finish or resume it before starting another examination.`
+          );
+          err.statusCode = 409;
+          (err as any).details = { examId: activeAttempt.examId, attemptId: activeAttempt.attemptId };
+          throw err;
+        }
+        if (!activeAttempt.deviceSessionId) {
+          await ExamAttempt.updateOne(
+            { attemptId: activeAttempt.attemptId, deviceSessionId: '' },
+            { $set: { deviceSessionId } }
+          );
+          activeAttempt = await ExamAttempt.findOne({ attemptId: activeAttempt.attemptId }) || activeAttempt;
+        }
+        if (activeAttempt.deviceSessionId !== deviceSessionId) {
+          const err: any = new Error(
+            `Exam ${exam.title} — In Progress (attempt ${activeAttempt.attemptId}) in another browser or device.`
+          );
+          err.statusCode = 409;
+          (err as any).details = { examId: activeAttempt.examId, attemptId: activeAttempt.attemptId };
+          throw err;
+        }
         const questions = await Question.find({
           questionId: { $in: exam.questions },
           status: 'ACTIVE'
         });
+        const questionMap = new Map(questions.map(question => [question.questionId, question]));
+        const orderedQuestions = exam.questions
+          .map(questionId => questionMap.get(questionId))
+          .filter(question => question !== undefined);
         const remainingSeconds = Math.max(
           0,
           Math.floor((activeAttempt.expiresAt.getTime() - now.getTime()) / 1000)
         );
         return {
+          resumed: true,
           attempt: this.sanitizeAttemptForStudent(activeAttempt),
-          exam: {
-            examId: exam.examId,
-            title: exam.title,
-            subject: exam.subject,
-            durationMinutes: exam.durationMinutes,
-            totalMarks: exam.totalMarks,
-            passingMarks: exam.passingMarks,
-            attemptLimit: exam.attemptLimit || 1,
-            strictMode: exam.strictMode
-          },
-          questions: this.sanitizeQuestionsForStudent(questions),
-          remainingSeconds
+          exam: this.sanitizeExamForStudent(exam),
+          questions: this.sanitizeQuestionsForStudent(orderedQuestions),
+          remainingSeconds,
+          suspended: activeAttempt.suspended
         };
       }
     }
@@ -303,10 +415,13 @@ export class AttemptService {
     const startedAt = new Date();
     const expiresAt = new Date(startedAt.getTime() + exam.durationMinutes * 60 * 1000);
 
-    const attempt = await ExamAttempt.create({
+    let attempt: IExamAttemptDocument;
+    try {
+      attempt = await ExamAttempt.create({
       attemptId,
       examId: exam.examId,
       studentId: user.userId,
+      deviceSessionId,
       studentName: user.name,
       startedAt,
       expiresAt,
@@ -317,8 +432,35 @@ export class AttemptService {
       percentage: 0,
       attemptNumber: completedAttemptsCount + 1,
       proctoringStatus: 'CLEAN',
-      warningCount: 0
-    });
+      warningCount: 0,
+      currentQuestionIndex: 0,
+      reportedQuestionIds: [],
+      suspended: false,
+      cameraStatus: 'UNKNOWN',
+      faceStatus: 'UNKNOWN',
+      fullscreenActive: false,
+      lastHeartbeatAt: startedAt
+      });
+    } catch (error: any) {
+      if (error?.code !== 11000) throw error;
+      const competingAttempt = await ExamAttempt.findOne({ studentId: user.userId, status: 'IN_PROGRESS' });
+      if (competingAttempt?.examId === examId && competingAttempt.deviceSessionId === deviceSessionId) {
+        return this.startAttempt(examId, user, deviceSessionId);
+      }
+      const competingExam = competingAttempt
+        ? await Exam.findOne({ examId: competingAttempt.examId }).select('title')
+        : null;
+      const conflict: any = new Error(
+        competingAttempt
+          ? `You already have ${competingExam?.title || competingAttempt.examId} — In Progress (attempt ${competingAttempt.attemptId}).`
+          : 'An examination attempt was started concurrently. Refresh and try again.'
+      );
+      conflict.statusCode = 409;
+      conflict.details = competingAttempt
+        ? { examId: competingAttempt.examId, attemptId: competingAttempt.attemptId }
+        : undefined;
+      throw conflict;
+    }
 
     await ExamAssignment.findOneAndUpdate(
       { examId: exam.examId, studentId: user.userId },
@@ -355,17 +497,9 @@ export class AttemptService {
     logger.info(`ExamAttempt ${attemptId} started by student ${user.userId} for exam ${examId}`);
 
     return {
+      resumed: false,
       attempt: this.sanitizeAttemptForStudent(attempt),
-      exam: {
-        examId: exam.examId,
-        title: exam.title,
-        subject: exam.subject,
-        durationMinutes: exam.durationMinutes,
-        totalMarks: exam.totalMarks,
-        passingMarks: exam.passingMarks,
-        attemptLimit: exam.attemptLimit || 1,
-        strictMode: exam.strictMode
-      },
+      exam: this.sanitizeExamForStudent(exam),
       questions: this.sanitizeQuestionsForStudent(orderedQuestions),
       remainingSeconds
     };
@@ -377,7 +511,8 @@ export class AttemptService {
   static async submitAttempt(
     attemptId: string,
     payload: { answers?: Array<{ questionId: string; selectedOption: string }>; terminateReason?: string },
-    user: JwtUserPayload
+    user: JwtUserPayload,
+    deviceSessionId: string
   ): Promise<{ attempt: any; resultId: string; status: string }> {
     const attempt = await ExamAttempt.findOne({ attemptId });
     if (!attempt) {
@@ -391,10 +526,16 @@ export class AttemptService {
       err.statusCode = 403;
       throw err;
     }
+    this.assertDeviceOwnership(attempt, user, deviceSessionId);
 
     if (attempt.status !== 'IN_PROGRESS') {
       const err: any = new Error(`Attempt has already been finalized with status ${attempt.status}`);
       err.statusCode = 400;
+      throw err;
+    }
+    if (attempt.suspended) {
+      const err: any = new Error('Attempt is suspended pending faculty assistance');
+      err.statusCode = 423;
       throw err;
     }
 
@@ -501,8 +642,15 @@ export class AttemptService {
    */
   static async saveProgressAnswers(
     attemptId: string,
-    answers: Array<{ questionId: string; selectedOption: string }>,
-    user: JwtUserPayload
+    answers: Array<{ questionId: string; selectedOption: string; markedForReview?: boolean }>,
+    user: JwtUserPayload,
+    state: {
+      currentQuestionIndex?: number;
+      cameraStatus?: 'ACTIVE' | 'OFFLINE' | 'UNKNOWN';
+      faceStatus?: 'DETECTED' | 'NOT_DETECTED' | 'MULTIPLE' | 'UNKNOWN';
+      fullscreenActive?: boolean;
+      deviceSessionId?: string;
+    } = {}
   ): Promise<{ attempt: any; remainingSeconds: number }> {
     const attempt = await ExamAttempt.findOne({ attemptId });
     if (!attempt) {
@@ -516,10 +664,16 @@ export class AttemptService {
       err.statusCode = 403;
       throw err;
     }
+    this.assertDeviceOwnership(attempt, user, state.deviceSessionId || '');
 
     if (attempt.status !== 'IN_PROGRESS') {
       const err: any = new Error(`Cannot save answers: Attempt is ${attempt.status}`);
       err.statusCode = 400;
+      throw err;
+    }
+    if (attempt.suspended) {
+      const err: any = new Error('Attempt is suspended pending faculty assistance');
+      err.statusCode = 423;
       throw err;
     }
 
@@ -580,23 +734,149 @@ export class AttemptService {
           throw err;
         }
       }
-      cleanAnswers.push({ questionId: qId, selectedOption: optId });
+      cleanAnswers.push({
+        questionId: qId,
+        selectedOption: optId,
+        markedForReview: Boolean(item.markedForReview)
+      });
     }
 
-    attempt.answers = cleanAnswers;
-    await attempt.save();
+    const updates: Record<string, unknown> = {
+      answers: cleanAnswers,
+      lastHeartbeatAt: now
+    };
+    if (Number.isInteger(state.currentQuestionIndex)) {
+      updates.currentQuestionIndex = Math.max(
+        0,
+        Math.min(state.currentQuestionIndex!, Math.max(0, exam.questions.length - 1))
+      );
+    }
+    if (state.cameraStatus) updates.cameraStatus = state.cameraStatus;
+    if (state.faceStatus) updates.faceStatus = state.faceStatus;
+    if (typeof state.fullscreenActive === 'boolean') updates.fullscreenActive = state.fullscreenActive;
+    const savedAttempt = await ExamAttempt.findOneAndUpdate(
+      {
+        attemptId,
+        studentId: user.userId,
+        status: 'IN_PROGRESS',
+        suspended: false,
+        deviceSessionId: state.deviceSessionId
+      },
+      { $set: updates },
+      { returnDocument: 'after' }
+    );
+    if (!savedAttempt) {
+      const err: any = new Error('Attempt is no longer available for answer changes');
+      err.statusCode = 409;
+      throw err;
+    }
 
-    const remainingSeconds = Math.max(0, Math.floor((attempt.expiresAt.getTime() - now.getTime()) / 1000));
+    const remainingSeconds = Math.max(0, Math.floor((savedAttempt.expiresAt.getTime() - now.getTime()) / 1000));
+    const [attemptExam, assignedStudent] = await Promise.all([
+      Exam.findOne({ examId: attempt.examId }).select('createdBy').lean(),
+      User.findOne({ userId: attempt.studentId }).select('managedBy teacherIds').lean()
+    ]);
+    emitTeacherAndAdmin(
+      Array.from(new Set([
+        ...(assignedStudent?.managedBy || []),
+        ...(assignedStudent?.teacherIds || []),
+        attemptExam?.createdBy || ''
+      ])),
+      'monitoring.updated',
+      { attempt: this.sanitizeAttemptForStudent(savedAttempt) },
+      user.userId
+    );
     return {
-      attempt: this.sanitizeAttemptForStudent(attempt),
+      attempt: this.sanitizeAttemptForStudent(savedAttempt),
       remainingSeconds
+    };
+  }
+
+  static async recordHeartbeat(
+    attemptId: string,
+    user: JwtUserPayload,
+    state: {
+      cameraStatus?: 'ACTIVE' | 'OFFLINE' | 'UNKNOWN';
+      faceStatus?: 'DETECTED' | 'NOT_DETECTED' | 'MULTIPLE' | 'UNKNOWN';
+      fullscreenActive?: boolean;
+      deviceSessionId?: string;
+    } = {}
+  ): Promise<{ attempt: any; remainingSeconds: number; result?: IResultDocument }> {
+    const attempt = await ExamAttempt.findOne({ attemptId });
+    if (!attempt) {
+      const err: any = new Error(`Attempt ${attemptId} not found`);
+      err.statusCode = 404;
+      throw err;
+    }
+    if (attempt.studentId !== user.userId) {
+      const err: any = new Error('Forbidden: You do not own this examination attempt');
+      err.statusCode = 403;
+      throw err;
+    }
+    this.assertDeviceOwnership(attempt, user, state.deviceSessionId || '');
+    if (attempt.status !== 'IN_PROGRESS') {
+      const err: any = new Error(`Attempt is ${attempt.status}`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const now = new Date();
+    if (now.getTime() >= attempt.expiresAt.getTime()) {
+      const exam = await Exam.findOne({ examId: attempt.examId });
+      const evaluation = exam
+        ? await this.evaluateAndCreateResult(attempt, exam, attempt.answers || [], 'EXPIRED')
+        : undefined;
+      return {
+        attempt: this.sanitizeAttemptForStudent(attempt),
+        remainingSeconds: 0,
+        result: evaluation?.result
+      };
+    }
+
+    const heartbeatUpdates: Record<string, unknown> = { lastHeartbeatAt: now };
+    if (state.cameraStatus) heartbeatUpdates.cameraStatus = state.cameraStatus;
+    if (state.faceStatus) heartbeatUpdates.faceStatus = state.faceStatus;
+    if (typeof state.fullscreenActive === 'boolean') heartbeatUpdates.fullscreenActive = state.fullscreenActive;
+    const updatedAttempt = await ExamAttempt.findOneAndUpdate(
+      {
+        attemptId,
+        studentId: user.userId,
+        status: 'IN_PROGRESS',
+        deviceSessionId: state.deviceSessionId
+      },
+      { $set: heartbeatUpdates },
+      { returnDocument: 'after' }
+    );
+    if (!updatedAttempt) {
+      const err: any = new Error('Attempt is no longer active');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const [exam, student] = await Promise.all([
+      Exam.findOne({ examId: attempt.examId }).select('createdBy').lean(),
+      User.findOne({ userId: attempt.studentId }).select('managedBy teacherIds').lean()
+    ]);
+    emitTeacherAndAdmin(
+      Array.from(new Set([
+        ...(student?.managedBy || []),
+        ...(student?.teacherIds || []),
+        exam?.createdBy || ''
+      ])),
+      'monitoring.updated',
+      { attempt: this.sanitizeAttemptForStudent(updatedAttempt) },
+      user.userId
+    );
+    return {
+      attempt: this.sanitizeAttemptForStudent(updatedAttempt),
+      remainingSeconds: Math.max(0, Math.floor((updatedAttempt.expiresAt.getTime() - now.getTime()) / 1000))
     };
   }
 
   /**
    * Get single attempt with timer check and RBAC protection
    */
-  static async getAttemptById(attemptId: string, user: JwtUserPayload): Promise<any> {
+  static async getAttemptById(attemptId: string, user: JwtUserPayload, deviceSessionId: string): Promise<any> {
     const attempt = await ExamAttempt.findOne({ attemptId });
     if (!attempt) {
       const err: any = new Error(`Attempt ${attemptId} not found`);
@@ -616,11 +896,19 @@ export class AttemptService {
       err.statusCode = 403;
       throw err;
     }
+    this.assertDeviceOwnership(attempt, user, deviceSessionId);
 
     if (user.role === 'TEACHER' && exam.createdBy !== user.userId) {
-      const err: any = new Error('Forbidden: You do not own the examination for this attempt');
-      err.statusCode = 403;
-      throw err;
+      const student = await User.findOne({
+        userId: attempt.studentId,
+        role: 'STUDENT',
+        $or: [{ managedBy: user.userId }, { teacherIds: user.userId }]
+      }).select('_id').lean();
+      if (!student) {
+        const err: any = new Error('Forbidden: This student is not assigned to you');
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
     const now = new Date();
@@ -643,13 +931,14 @@ export class AttemptService {
 
       return {
         attempt: this.sanitizeAttemptForStudent(attempt),
+        exam: this.sanitizeExamForStudent(exam),
         questions: this.sanitizeQuestionsForStudent(orderedQuestions),
         remainingSeconds
       };
     }
 
     return {
-      attempt,
+      attempt: this.sanitizeAttemptForStaff(attempt),
       remainingSeconds
     };
   }
@@ -666,22 +955,28 @@ export class AttemptService {
     }
 
     if (user.role === 'TEACHER') {
-      const teacherExams = await Exam.find({ createdBy: user.userId }).select('examId').lean();
-      const teacherExamIds = teacherExams.map(e => e.examId);
-      if (filters.examId && !teacherExamIds.includes(filters.examId)) {
-        const err: any = new Error('Forbidden: You do not own this examination');
-        err.statusCode = 403;
-        throw err;
-      }
+      const [teacherExams, students] = await Promise.all([
+        Exam.find({ createdBy: user.userId }).select('examId').lean(),
+        User.find({
+          role: 'STUDENT',
+          $or: [{ managedBy: user.userId }, { teacherIds: user.userId }]
+        }).select('userId').lean()
+      ]);
       const query: any = {
-        examId: filters.examId ? filters.examId : { $in: teacherExamIds }
+        $or: [
+          { examId: { $in: teacherExams.map(exam => exam.examId) } },
+          { studentId: { $in: students.map(student => student.userId) } }
+        ]
       };
-      return ExamAttempt.find(query).sort({ createdAt: -1 });
+      if (filters.examId) query.$and = [{ $or: query.$or }, { examId: filters.examId }];
+      const attempts = await ExamAttempt.find(query).sort({ createdAt: -1 });
+      return attempts.map(attempt => this.sanitizeAttemptForStaff(attempt));
     }
 
     const query: any = {};
     if (filters.examId) query.examId = filters.examId;
-    return ExamAttempt.find(query).sort({ createdAt: -1 });
+    const attempts = await ExamAttempt.find(query).sort({ createdAt: -1 });
+    return attempts.map(attempt => this.sanitizeAttemptForStaff(attempt));
   }
 
   /**
@@ -703,10 +998,18 @@ export class AttemptService {
       percentage: attempt.percentage,
       attemptNumber: attempt.attemptNumber,
       proctoringStatus: attempt.proctoringStatus,
+      suspended: attempt.suspended,
       warningCount: attempt.warningCount,
+      currentQuestionIndex: attempt.currentQuestionIndex || 0,
+      reportedQuestionIds: attempt.reportedQuestionIds || [],
+      cameraStatus: attempt.cameraStatus,
+      faceStatus: attempt.faceStatus,
+      fullscreenActive: attempt.fullscreenActive,
+      lastHeartbeatAt: attempt.lastHeartbeatAt,
       answers: (attempt.answers || []).map(a => ({
         questionId: a.questionId,
-        selectedOption: a.selectedOption
+        selectedOption: a.selectedOption,
+        markedForReview: a.markedForReview
       }))
     };
   }

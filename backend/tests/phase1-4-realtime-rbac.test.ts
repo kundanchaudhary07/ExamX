@@ -23,7 +23,10 @@ async function request(
   path: string,
   options: { token?: string; body?: any } = {}
 ): Promise<{ status: number; json: any }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-ExamX-Device-Session': '00000000-0000-4000-8000-000000000001'
+  };
   if (options.token) {
     headers['Authorization'] = `Bearer ${options.token}`;
   }
@@ -377,14 +380,57 @@ async function runPhase14Tests() {
       e => e.event === 'proctoring.event' && e.data?.event?.attemptId === attemptId
     );
 
-    const submitAtt = await request('POST', `/api/attempts/${attemptId}/submit`, {
+    for (let warning = 2; warning <= 5; warning += 1) {
+      const warningEvent = await request('POST', '/api/proctoring/events', {
+        token: studentAToken,
+        body: {
+          examId,
+          attemptId,
+          eventType: 'TAB_SWITCH',
+          severity: 'MEDIUM',
+          details: `Suspension warning ${warning}`
+        }
+      });
+      assert.equal(warningEvent.status, 201);
+    }
+    await waitForEvent(
+      teacherAClient.events,
+      e => e.event === 'attempt.suspended' && e.data?.attemptId === attemptId
+    );
+
+    const assistanceRequest = await request('POST', '/api/proctoring/unblock-requests', {
       token: studentAToken,
-      body: {
-        answers: [{ questionId, selectedOption: 'A' }]
-      }
+      body: { attemptId, examId, reason: 'Please review my suspended attempt.' }
     });
-    assert.equal(submitAtt.status, 200);
-    const resultId = submitAtt.json.data.resultId;
+    assert.equal(assistanceRequest.status, 201);
+    const requestId = assistanceRequest.json.data.request.requestId;
+
+    const rejectAssistance = await request(
+      'PATCH',
+      `/api/proctoring/unblock-requests/${requestId}`,
+      {
+        token: teacherAToken,
+        body: { status: 'REJECTED', remarks: 'Attempt submitted after rejection.' }
+      }
+    );
+    assert.equal(rejectAssistance.status, 200);
+    await waitForEvent(
+      studentAClient.events,
+      e => e.event === 'unblock.updated' &&
+        e.data?.request?.requestId === requestId &&
+        e.data?.request?.status === 'REJECTED'
+    );
+    await waitForEvent(
+      studentAClient.events,
+      e => e.event === 'attempt.submitted' && e.data?.attemptId === attemptId
+    );
+    const finalizedAttempt = await ExamAttempt.findOne({ attemptId });
+    assert.equal(finalizedAttempt?.status, 'SUBMITTED');
+    assert.equal(finalizedAttempt?.warningCount, 5);
+    assert.equal(finalizedAttempt?.cameraStatus, 'OFFLINE');
+    const submittedResult = await Result.findOne({ attemptId });
+    assert.ok(submittedResult);
+    const resultId = submittedResult!.resultId;
 
     await waitForEvent(
       teacherAClient.events,

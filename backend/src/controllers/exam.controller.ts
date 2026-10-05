@@ -212,7 +212,11 @@ export class ExamController {
 
   static async startExamAttempt(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await AttemptService.startAttempt(req.params.examId as string, req.user!);
+      const result = await AttemptService.startAttempt(
+        req.params.examId as string,
+        req.user!,
+        req.get('X-ExamX-Device-Session') || req.body?.deviceSessionId || ''
+      );
       res.status(201).json({
         success: true,
         data: result

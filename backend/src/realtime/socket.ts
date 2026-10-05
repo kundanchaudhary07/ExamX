@@ -25,6 +25,7 @@ export type RealtimeEventName =
   | 'question.deleted'
   | 'result.created'
   | 'result.published'
+  | 'results.bulkPublished'
   | 'result.updated'
   | 'query.created'
   | 'query.updated'
@@ -34,6 +35,10 @@ export type RealtimeEventName =
   | 'proctoring.completed'
   | 'unblock.created'
   | 'unblock.updated'
+  | 'attempt.suspended'
+  | 'attempt.resumed'
+  | 'attempt.submitted'
+  | 'monitoring.updated'
   | 'message.created'
   | 'audit.created'
   | 'notification.created';

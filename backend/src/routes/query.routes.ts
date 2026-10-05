@@ -14,7 +14,10 @@ router.post(
   requireRole('STUDENT'),
   async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const query = await QueryService.createQuery(req.body || {}, req.user!);
+      const query = await QueryService.createQuery(
+        { ...(req.body || {}), deviceSessionId: req.get('X-ExamX-Device-Session') || '' },
+        req.user!
+      );
       res.status(201).json({
         success: true,
         data: { query }

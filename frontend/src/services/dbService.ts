@@ -12,6 +12,7 @@ import {
   StudentResult,
   StudentQuery,
   ProctoringEventRecord,
+  AssistanceRequestRecord,
   AuditLog,
   QuestionOption,
   AiGenerationBatch
@@ -19,6 +20,22 @@ import {
 
 const AUTH_TOKEN_KEY = 'examx_auth_token';
 const LEGACY_TOKEN_KEY = 'auth_token';
+const DEVICE_SESSION_KEY = 'examx_device_session_id';
+
+function getDeviceSessionId(): string {
+  const saved = localStorage.getItem(DEVICE_SESSION_KEY);
+  if (saved && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(saved)) {
+    return saved;
+  }
+
+  if (!globalThis.crypto?.randomUUID) {
+    throw new Error('This browser cannot securely identify the examination session.');
+  }
+
+  const deviceSessionId = globalThis.crypto.randomUUID();
+  localStorage.setItem(DEVICE_SESSION_KEY, deviceSessionId);
+  return deviceSessionId;
+}
 
 function resolveApiBase(): string {
   const configured = ((import.meta as any).env?.VITE_API_URL || '').trim();
@@ -84,6 +101,7 @@ function getAuthHeaders(includeJsonContentType = true): HeadersInit {
     headers['Content-Type'] = 'application/json';
   }
   if (token) {
+    headers['X-ExamX-Device-Session'] = getDeviceSessionId();
     headers['Authorization'] = `Bearer ${token}`;
   }
   return headers;
@@ -235,6 +253,10 @@ export function mapBackendQuestionToFrontend(q: any): Question {
 }
 
 export function mapBackendExamToFrontend(e: any): ScheduledExam {
+  if (!e || typeof e !== 'object') {
+    throw new Error('Exam metadata is missing from the server response.');
+  }
+
   const rawStart = e.startTime || e.startAt || e.startDateTime || e.createdAt;
   const rawEnd = e.endTime || e.endAt || e.endDateTime;
   const startDt = rawStart ? new Date(rawStart) : null;
@@ -369,6 +391,10 @@ export function mapBackendQueryToFrontend(q: any): StudentQuery {
   const descriptionText = q.description || q.explanation || q.message || q.question || '';
   const responseText = q.response || q.teacherRemarks || q.facultyComment || q.reply || '';
   const createdStr = q.createdAt ? new Date(q.createdAt).toLocaleString() : '—';
+  const normalizedReason = (() => {
+    const rawReason = (q.reasonType || q.reason || 'EVALUATION_ERROR') as StudentQuery['reasonType'];
+    return rawReason;
+  })();
 
   return {
     id: q.queryId || q.id || q._id,
@@ -382,11 +408,15 @@ export function mapBackendQueryToFrontend(q: any): StudentQuery {
     attemptId: q.attemptId || '',
     resultId: q.resultId || '',
     questionId: q.questionId || 'GENERAL',
+    questionNumber: q.questionNumber || 0,
     questionText: q.questionText || 'General Examination Query',
+    options: q.options || [],
+    studentAnswer: q.studentAnswer || '',
+    assignedFacultyId: q.assignedFacultyId || '',
     question: descriptionText,
     currentMarks: q.currentMarks ?? 0,
     maxMarks: q.maxMarks ?? 1,
-    reasonType: q.reasonType || q.reason || 'EVALUATION_ERROR',
+    reasonType: normalizedReason,
     message: descriptionText,
     description: descriptionText,
     status: normalizedStatus,
@@ -394,11 +424,39 @@ export function mapBackendQueryToFrontend(q: any): StudentQuery {
     reply: responseText,
     facultyComment: responseText,
     scoreAdjustment: q.scoreAdjustment ?? 0,
+    resolutionType: q.resolutionType,
+    resolutionNotes: q.resolutionNotes || '',
+    correctedAnswer: q.correctedAnswer || '',
     resolvedBy: q.resolvedBy || '',
     resolvedByName: q.resolvedByName || '',
     resolvedAt: q.resolvedAt || null,
     createdAt: createdStr,
     timestamp: createdStr
+  };
+}
+
+function mapBackendAttemptToFrontend(attempt: any): ExamAttemptRecord {
+  if (!attempt || typeof attempt !== 'object') {
+    throw new Error('Attempt data is missing from the server response.');
+  }
+
+  return {
+    ...attempt,
+    id: attempt.attemptId || attempt.id || attempt._id,
+    attemptId: attempt.attemptId || attempt.id,
+    startedAt: attempt.startedAt ? new Date(attempt.startedAt).toISOString() : '',
+    expiresAt: attempt.expiresAt ? new Date(attempt.expiresAt).toISOString() : '',
+    submittedAt: attempt.submittedAt ? new Date(attempt.submittedAt).toISOString() : null,
+    lastHeartbeatAt: attempt.lastHeartbeatAt ? new Date(attempt.lastHeartbeatAt).toISOString() : undefined,
+    currentQuestionIndex: attempt.currentQuestionIndex || 0,
+    warningCount: attempt.warningCount || 0,
+    answers: Array.isArray(attempt.answers)
+      ? attempt.answers.map((answer: any) => ({
+          ...answer,
+          selectedOption: answer.selectedOption || null,
+          markedForReview: Boolean(answer.markedForReview)
+        }))
+      : []
   };
 }
 
@@ -936,6 +994,7 @@ export const dbService = {
     subject?: string;
     topic?: string;
     unit?: string;
+    selectedUnits?: string[];
     course: string;
     semester: string;
     difficulty: Difficulty | 'MIXED';
@@ -946,7 +1005,7 @@ export const dbService = {
   }): Promise<{
     generated: Question[];
     savedQuestions: Question[];
-    provider: 'GEMINI' | 'GROQ';
+    provider: 'GROQ';
     generationBatch: AiGenerationBatch;
     syllabus?: { fileName: string; fileType: string; charCount: number };
   }> {
@@ -958,7 +1017,7 @@ export const dbService = {
     const data = await handleApiResponse<{
       generated: any[];
       savedQuestions: any[];
-      provider: 'GEMINI' | 'GROQ';
+      provider: 'GROQ';
       generationBatch: AiGenerationBatch;
     }>(res);
     return {
@@ -1112,7 +1171,7 @@ export const dbService = {
       headers: getAuthHeaders()
     });
     const data = await handleApiResponse<{ attempts: ExamAttemptRecord[] }>(res);
-    return data.attempts || [];
+    return (data.attempts || []).map(mapBackendAttemptToFrontend);
   },
 
   // --- STUDENT EXAMS & ATTEMPTS ---
@@ -1150,7 +1209,7 @@ export const dbService = {
     const res = await fetch(`${API_BASE}/attempts/start`, {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ examId })
+      body: JSON.stringify({ examId, deviceSessionId: getDeviceSessionId() })
     });
     const data = await handleApiResponse<{
       resumed: boolean;
@@ -1159,10 +1218,20 @@ export const dbService = {
       questions: any[];
       remainingSeconds: number;
     }>(res);
+    if (
+      !data?.attempt ||
+      !data.exam ||
+      !Array.isArray(data.questions) ||
+      typeof data.remainingSeconds !== 'number' ||
+      !Number.isFinite(data.remainingSeconds) ||
+      data.remainingSeconds < 0
+    ) {
+      throw new Error('The server returned an incomplete exam attempt response.');
+    }
 
     return {
       resumed: data.resumed,
-      attempt: data.attempt,
+      attempt: mapBackendAttemptToFrontend(data.attempt),
       exam: mapBackendExamToFrontend(data.exam),
       questions: (data.questions || []).map(mapBackendQuestionToFrontend),
       remainingSeconds: data.remainingSeconds
@@ -1171,8 +1240,7 @@ export const dbService = {
 
   async getAttemptById(attemptId: string): Promise<{
     attempt: ExamAttemptRecord;
-    exam: ScheduledExam;
-    questions: Question[];
+    exam: ScheduledExam | null;
     remainingSeconds: number;
   }> {
     const res = await fetch(`${API_BASE}/attempts/${encodeURIComponent(attemptId)}`, {
@@ -1180,15 +1248,21 @@ export const dbService = {
       headers: getAuthHeaders()
     });
     const data = await handleApiResponse<{
-      attempt: ExamAttemptRecord;
-      exam: any;
-      questions: any[];
+      attempt?: ExamAttemptRecord;
+      exam?: any;
       remainingSeconds: number;
     }>(res);
+    if (
+      !data?.attempt ||
+      typeof data.remainingSeconds !== 'number' ||
+      !Number.isFinite(data.remainingSeconds) ||
+      data.remainingSeconds < 0
+    ) {
+      throw new Error('Attempt response is missing a valid server timer.');
+    }
     return {
-      attempt: data.attempt,
-      exam: mapBackendExamToFrontend(data.exam),
-      questions: (data.questions || []).map(mapBackendQuestionToFrontend),
+      attempt: mapBackendAttemptToFrontend(data.attempt),
+      exam: data.exam ? mapBackendExamToFrontend(data.exam) : null,
       remainingSeconds: data.remainingSeconds
     };
   },
@@ -1199,6 +1273,9 @@ export const dbService = {
       answers: ExamAttemptRecord['answers'];
       currentQuestionIndex?: number;
       warningCount?: number;
+      cameraStatus?: ExamAttemptRecord['cameraStatus'];
+      faceStatus?: ExamAttemptRecord['faceStatus'];
+      fullscreenActive?: boolean;
     }
   ): Promise<ExamAttemptRecord> {
     const res = await fetch(`${API_BASE}/attempts/${encodeURIComponent(attemptId)}/answers`, {
@@ -1207,7 +1284,28 @@ export const dbService = {
       body: JSON.stringify(payload)
     });
     const data = await handleApiResponse<{ attempt: ExamAttemptRecord }>(res);
-    return data.attempt;
+    return mapBackendAttemptToFrontend(data.attempt);
+  },
+
+  async heartbeatAttempt(
+    attemptId: string,
+    state: {
+      cameraStatus?: ExamAttemptRecord['cameraStatus'];
+      faceStatus?: ExamAttemptRecord['faceStatus'];
+      fullscreenActive?: boolean;
+    }
+  ): Promise<{ attempt: ExamAttemptRecord; remainingSeconds: number; result?: StudentResult }> {
+    const res = await fetch(`${API_BASE}/attempts/${encodeURIComponent(attemptId)}/heartbeat`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(state)
+    });
+    const data = await handleApiResponse<{ attempt: any; remainingSeconds: number; result?: any }>(res);
+    return {
+      attempt: mapBackendAttemptToFrontend(data.attempt),
+      remainingSeconds: data.remainingSeconds,
+      result: data.result ? mapBackendResultToFrontend(data.result) : undefined
+    };
   },
 
   async submitExamAttempt(
@@ -1332,9 +1430,10 @@ export const dbService = {
   async resolveQuery(
     queryId: string,
     payload: {
-      status: 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESOLVED';
-      response: string;
+      resolutionType: NonNullable<StudentQuery['resolutionType']>;
+      resolutionNotes: string;
       scoreAdjustment?: number;
+      correctedAnswer?: string;
     }
   ): Promise<StudentQuery> {
     const res = await fetch(`${API_BASE}/queries/${encodeURIComponent(queryId)}/resolve`, {
@@ -1353,6 +1452,7 @@ export const dbService = {
     eventType: ProctoringEventRecord['eventType'];
     severity?: ProctoringEventRecord['severity'];
     details?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<ProctoringEventRecord> {
     const res = await fetch(`${API_BASE}/proctoring/events`, {
       method: 'POST',
@@ -1397,7 +1497,7 @@ export const dbService = {
     examId?: string;
     studentId?: string;
     status?: string;
-  }): Promise<any[]> {
+  }): Promise<AssistanceRequestRecord[]> {
     const params = new URLSearchParams();
     if (filters?.examId) params.set('examId', filters.examId);
     if (filters?.studentId) params.set('studentId', filters.studentId);

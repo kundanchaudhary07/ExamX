@@ -5,13 +5,28 @@ export type QueryReasonType =
   | 'INCORRECT_KEY'
   | 'EVALUATION_ERROR'
   | 'TECHNICAL_GLITCH'
-  | 'OTHER';
+  | 'OTHER'
+  | 'INCORRECT_QUESTION'
+  | 'TYPO_ERROR'
+  | 'TECHNICAL_ISSUE'
+  | 'OUT_OF_SYLLABUS'
+  | 'INCORRECT_OPTIONS'
+  | 'MULTIPLE_OPTIONS_CORRECT'
+  | 'QUESTION_UNCLEAR';
 
 export type QueryStatusType =
   | 'PENDING'
   | 'UNDER_REVIEW'
   | 'RESOLVED_ACCEPTED'
   | 'RESOLVED_REJECTED';
+
+export type QueryResolutionType =
+  | 'VALID_QUESTION'
+  | 'OUT_OF_SYLLABUS'
+  | 'INVALID_QUESTION'
+  | 'CORRECT_ANSWER_CHANGED'
+  | 'GRACE_MARKS'
+  | 'EXCLUDE_QUESTION';
 
 export interface IStudentQueryDocument extends Document {
   queryId: string;
@@ -20,14 +35,20 @@ export interface IStudentQueryDocument extends Document {
   attemptId?: string;
   resultId?: string;
   questionId?: string;
+  questionNumber?: number;
   questionText: string;
+  options: Array<{ id: string; text: string }>;
   studentId: string;
   studentName: string;
   studentAnswer?: string;
   expectedAnswer?: string;
+  assignedFacultyId: string;
   reason: QueryReasonType;
   explanation: string;
   status: QueryStatusType;
+  resolutionType?: QueryResolutionType;
+  resolutionNotes?: string;
+  correctedAnswer?: string;
   teacherRemarks?: string;
   scoreAdjustment: number;
   resolvedBy?: string;
@@ -71,10 +92,18 @@ const StudentQuerySchema = new Schema<IStudentQueryDocument>(
       default: '',
       trim: true
     },
+    questionNumber: {
+      type: Number,
+      default: 0
+    },
     questionText: {
       type: String,
       required: [true, 'Question text or reference is required'],
       trim: true
+    },
+    options: {
+      type: [{ id: String, text: String }],
+      default: []
     },
     studentId: {
       type: String,
@@ -97,9 +126,28 @@ const StudentQuerySchema = new Schema<IStudentQueryDocument>(
       default: '',
       trim: true
     },
+    assignedFacultyId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true
+    },
     reason: {
       type: String,
-      enum: ['AMBIGUOUS_QUESTION', 'INCORRECT_KEY', 'EVALUATION_ERROR', 'TECHNICAL_GLITCH', 'OTHER'],
+      enum: [
+        'AMBIGUOUS_QUESTION',
+        'INCORRECT_KEY',
+        'EVALUATION_ERROR',
+        'TECHNICAL_GLITCH',
+        'OTHER',
+        'INCORRECT_QUESTION',
+        'TYPO_ERROR',
+        'TECHNICAL_ISSUE',
+        'OUT_OF_SYLLABUS',
+        'INCORRECT_OPTIONS',
+        'MULTIPLE_OPTIONS_CORRECT',
+        'QUESTION_UNCLEAR'
+      ],
       default: 'INCORRECT_KEY'
     },
     explanation: {
@@ -112,6 +160,27 @@ const StudentQuerySchema = new Schema<IStudentQueryDocument>(
       enum: ['PENDING', 'UNDER_REVIEW', 'RESOLVED_ACCEPTED', 'RESOLVED_REJECTED'],
       default: 'PENDING',
       index: true
+    },
+    resolutionType: {
+      type: String,
+      enum: [
+        'VALID_QUESTION',
+        'OUT_OF_SYLLABUS',
+        'INVALID_QUESTION',
+        'CORRECT_ANSWER_CHANGED',
+        'GRACE_MARKS',
+        'EXCLUDE_QUESTION'
+      ]
+    },
+    resolutionNotes: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    correctedAnswer: {
+      type: String,
+      default: '',
+      trim: true
     },
     teacherRemarks: {
       type: String,

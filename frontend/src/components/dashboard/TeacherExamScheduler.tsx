@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ScheduledExam, Question, SystemUser } from '../../types';
+import { ScheduledExam, Question, SystemUser, AiGenerationBatch } from '../../types';
 import {
   StatusBadge,
   EmptyState,
@@ -71,10 +71,10 @@ const EXAM_STATUS_OPTIONS = [
 interface TeacherExamSchedulerProps {
   exams: ScheduledExam[];
   questions?: Question[];
+  generationBatches?: AiGenerationBatch[];
   students?: SystemUser[];
   onSaveExam: (exam: ScheduledExam) => Promise<void> | void;
   onDeleteExam?: (id: string) => Promise<void> | void;
-  onRefresh?: () => Promise<void> | void;
   onStatusChange?: (
     examId: string,
     status:
@@ -88,7 +88,6 @@ interface TeacherExamSchedulerProps {
       | 'ARCHIVED',
     publishResults?: boolean
   ) => Promise<void> | void;
-  onPublishExamResults?: (examId: string) => Promise<void> | void;
   onRequestGenerateQuestions?: (context: {
     subject: string;
     course: string;
@@ -107,12 +106,11 @@ interface TeacherExamSchedulerProps {
 export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
   exams,
   questions = [],
+  generationBatches = [],
   students = [],
   onSaveExam,
   onDeleteExam,
-  onRefresh,
   onStatusChange,
-  onPublishExamResults,
   onRequestGenerateQuestions,
   savedDraft
 }) => {
@@ -131,6 +129,7 @@ export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
   const [questionPage, setQuestionPage] = useState(1);
   const QUESTIONS_PER_PAGE = 6;
   const [isQuestionWorkspaceOpen, setIsQuestionWorkspaceOpen] = useState(false);
+  const [selectedGenerationSet, setSelectedGenerationSet] = useState('');
 
   // Student assignment search & filters
   const [studentSearch, setStudentSearch] = useState('');
@@ -279,6 +278,43 @@ export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
     });
   };
 
+  const applyGenerationSet = () => {
+    const batch = generationBatches.find((item) => item.generationId === selectedGenerationSet);
+    if (!batch) {
+      setActionError('Select a previous question set first.');
+      return;
+    }
+    const batchIds = new Set(batch.questionIds || []);
+    const reusableQuestions = questions.filter((question) => {
+      const questionId = question.questionId || question.id;
+      return batchIds.has(questionId) &&
+        question.status === 'ACTIVE' &&
+        question.reviewStatus === 'APPROVED' &&
+        String(question.subject || '').trim().toLocaleLowerCase() === String(formData.subject || '').trim().toLocaleLowerCase() &&
+        (!question.course || question.course.trim().toLocaleLowerCase() === String(formData.course || '').trim().toLocaleLowerCase()) &&
+        (!question.semester || question.semester.trim().toLocaleLowerCase() === String(formData.semester || '').trim().toLocaleLowerCase());
+    });
+    if (!reusableQuestions.length) {
+      setActionError('This question set has no approved questions matching the exam subject, course, and semester.');
+      return;
+    }
+    const existingIds = new Set(formData.questionIds || []);
+    const nextIds = [...existingIds, ...reusableQuestions
+      .map((question) => question.questionId || question.id)
+      .filter((questionId) => !existingIds.has(questionId))];
+    const selectedQuestionObjs = questions.filter((question) =>
+      nextIds.includes(question.questionId || question.id)
+    );
+    const calculatedMarks = selectedQuestionObjs.reduce((sum, question) => sum + (question.marks || 1), 0);
+    setFormData({
+      ...formData,
+      questionIds: nextIds,
+      totalMarks: calculatedMarks,
+      passingMarks: calculatedMarks > 0 ? Math.max(1, Math.round(calculatedMarks * 0.4)) : 0
+    });
+    setActionError(null);
+  };
+
   const toggleStudentId = (sId: string) => {
     const current = formData.assignedStudentIds || [];
     const exists = current.includes(sId);
@@ -377,9 +413,6 @@ export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
         await onStatusChange(examKey, nextStatus, publishResults);
       } else {
         await dbService.updateExamStatus(examKey, nextStatus, publishResults);
-        if (onRefresh) {
-          await onRefresh();
-        }
       }
     } catch (err: any) {
       setActionError(err?.message || `Failed to transition exam to ${nextStatus}`);
@@ -428,9 +461,6 @@ export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
       ],
       action: async () => {
         setActionError(null);
-        if (onPublishExamResults) {
-          await onPublishExamResults(examKey);
-        }
         await handleInlineStatusChange(exam, 'RESULT_PUBLISHED', true);
       }
     });
@@ -1041,6 +1071,31 @@ export const TeacherExamScheduler: React.FC<TeacherExamSchedulerProps> = ({
                           <Sparkles className="w-4 h-4 text-purple-600 dark:text-purple-400" />
                           Generate Questions (AI)
                         </button>
+                      )}
+                      {generationBatches.some((batch) => batch.approvedCount > 0) && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            value={selectedGenerationSet}
+                            onChange={(event) => setSelectedGenerationSet(event.target.value)}
+                            aria-label="Select a previous AI question set"
+                            className="h-9 max-w-[260px] rounded-lg border border-slate-200 bg-white px-2.5 text-[12.5px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                          >
+                            <option value="">Previous question set...</option>
+                            {generationBatches.filter((batch) => batch.approvedCount > 0).map((batch) => (
+                              <option key={batch.generationId} value={batch.generationId}>
+                                {batch.subject} · {batch.course} · {batch.semester} · {batch.approvedCount} approved
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={applyGenerationSet}
+                            disabled={!selectedGenerationSet}
+                            className="h-9 rounded-lg border border-slate-200 px-3 text-[12.5px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                          >
+                            Use Set
+                          </button>
+                        </div>
                       )}
                     </div>
                     <div className="flex items-center gap-3 text-[13.5px]">

@@ -10,7 +10,12 @@ export type ProctoringEventType =
   | 'LOOKING_AWAY'
   | 'COPY_PASTE_ATTEMPT'
   | 'RIGHT_CLICK_ATTEMPT'
-  | 'SCREENSHOT_ATTEMPT';
+  | 'SCREENSHOT_ATTEMPT'
+  | 'WINDOW_BLUR'
+  | 'WINDOW_FOCUS'
+  | 'CAMERA_CONNECTED'
+  | 'FACE_DETECTED'
+  | 'FACE_STATUS';
 
 export type ProctoringSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
@@ -73,7 +78,12 @@ const ProctoringEventSchema = new Schema<IProctoringEventDocument>(
         'LOOKING_AWAY',
         'COPY_PASTE_ATTEMPT',
         'RIGHT_CLICK_ATTEMPT',
-        'SCREENSHOT_ATTEMPT'
+        'SCREENSHOT_ATTEMPT',
+        'WINDOW_BLUR',
+        'WINDOW_FOCUS',
+        'CAMERA_CONNECTED',
+        'FACE_DETECTED',
+        'FACE_STATUS'
       ],
       required: true
     },

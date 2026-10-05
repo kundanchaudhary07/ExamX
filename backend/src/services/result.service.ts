@@ -216,23 +216,36 @@ export class ResultService {
       details: `Published ${res.modifiedCount} results for exam ${examId}`
     });
 
-    for (const r of pendingResults) {
-      const updatedJson = {
+    const publishedResults = pendingResults.map(r => ({
         ...r.toJSON(),
         status: 'PUBLISHED',
         publishedAt: now,
         verifiedBy: user.userId
-      };
+      }));
+
+    emitToRooms(
+      ['role:ADMIN', `teacher:${exam.createdBy}`],
+      'results.bulkPublished',
+      {
+        examId,
+        resultIds: publishedResults.map(result => result.resultId),
+        publishedAt: now,
+        publishedBy: user.userId
+      },
+      user.userId
+    );
+
+    for (const result of publishedResults) {
       emitToRooms(
-        ['role:ADMIN', `teacher:${exam.createdBy}`, `student:${r.studentId}`],
+        [`student:${result.studentId}`],
         'result.published',
-        { result: updatedJson },
+        { result },
         user.userId
       );
       emitNotification(
-        [`student:${r.studentId}`],
+        [`student:${result.studentId}`],
         {
-          id: `notif-${Date.now()}-${r.resultId}`,
+          id: `notif-${Date.now()}-${result.resultId}`,
           title: `Result published for ${exam.title}`
         },
         user.userId

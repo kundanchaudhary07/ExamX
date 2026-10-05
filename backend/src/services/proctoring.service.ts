@@ -6,10 +6,12 @@ import {
 } from '../models/ProctoringEvent';
 import { Exam } from '../models/Exam';
 import { ExamAssignment } from '../models/ExamAssignment';
-import { ExamAttempt } from '../models/ExamAttempt';
+import { ExamAttempt, IExamAttemptDocument } from '../models/ExamAttempt';
+import { User } from '../models/User';
+import { Question } from '../models/Question';
 import { JwtUserPayload } from '../types/auth.types';
 import { generateNextProctoringEventId } from '../utils/exam-id.generator';
-import { emitTeacherAndAdmin } from '../realtime/socket';
+import { emitTeacherAndAdmin, emitToRooms } from '../realtime/socket';
 import { logger } from '../utils/logger';
 
 const VALID_EVENT_TYPES: ProctoringEventType[] = [
@@ -22,7 +24,12 @@ const VALID_EVENT_TYPES: ProctoringEventType[] = [
   'LOOKING_AWAY',
   'COPY_PASTE_ATTEMPT',
   'RIGHT_CLICK_ATTEMPT',
-  'SCREENSHOT_ATTEMPT'
+  'SCREENSHOT_ATTEMPT',
+  'WINDOW_BLUR',
+  'WINDOW_FOCUS',
+  'CAMERA_CONNECTED',
+  'FACE_DETECTED',
+  'FACE_STATUS'
 ];
 
 const VALID_SEVERITIES: ProctoringSeverity[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -34,11 +41,17 @@ export class ProctoringService {
   static async recordEvent(
     input: {
       attemptId?: string;
+      deviceSessionId?: string;
       examId: string;
       eventType: ProctoringEventType;
       severity?: ProctoringSeverity;
       details?: string;
-      metadata?: Record<string, any>;
+      metadata?: Record<string, any> & {
+        attemptState?: {
+          answers?: Array<{ questionId: string; selectedOption?: string | null; markedForReview?: boolean }>;
+          currentQuestionIndex?: number;
+        };
+      };
     },
     user: JwtUserPayload
   ): Promise<IProctoringEventDocument> {
@@ -70,9 +83,10 @@ export class ProctoringService {
 
     // Verify attempt ownership if attemptId is provided
     let attemptId = '';
+    let attemptRecord: IExamAttemptDocument | null = null;
     if (input.attemptId && typeof input.attemptId === 'string' && input.attemptId.trim()) {
       attemptId = input.attemptId.trim();
-      const attempt = await ExamAttempt.findOne({ attemptId });
+      let attempt = await ExamAttempt.findOne({ attemptId });
       if (!attempt) {
         const err: any = new Error(`Attempt ${attemptId} not found`);
         err.statusCode = 404;
@@ -83,17 +97,121 @@ export class ProctoringService {
         err.statusCode = 403;
         throw err;
       }
+      if (attempt.examId !== examId || attempt.status !== 'IN_PROGRESS') {
+        const err: any = new Error('Proctoring events must belong to your active attempt and examination');
+        err.statusCode = 400;
+        throw err;
+      }
+      if (!input.deviceSessionId || attempt.deviceSessionId !== input.deviceSessionId) {
+        const err: any = new Error('This examination attempt is active in another browser or device.');
+        err.statusCode = 403;
+        throw err;
+      }
+      attemptRecord = attempt;
+      const originalWarningCount = attempt.warningCount || 0;
 
-      // SCREENSHOT_ATTEMPT events are informational / browser security warnings only and must NEVER increment the warning counter
-      if (input.eventType !== 'SCREENSHOT_ATTEMPT') {
-        attempt.warningCount = (attempt.warningCount || 0) + 1;
-        attempt.proctoringStatus =
-          attempt.warningCount >= 6
-            ? 'TERMINATED'
-            : attempt.warningCount >= 3
-            ? 'FLAGGED'
-            : 'WARNED';
-        await attempt.save();
+      if (!attempt.suspended && Array.isArray(input.metadata?.attemptState?.answers)) {
+        const state = input.metadata.attemptState;
+        const questions = await Question.find({ questionId: { $in: exam.questions } });
+        const questionMap = new Map(questions.map(question => [question.questionId, question]));
+        const answers = [];
+        for (const answer of state.answers) {
+          const question = questionMap.get(answer.questionId);
+          const selectedOption = answer.selectedOption ? String(answer.selectedOption).trim() : '';
+          if (!question || !exam.questions.includes(answer.questionId)) {
+            const err: any = new Error('Proctoring checkpoint contains a question outside this examination');
+            err.statusCode = 400;
+            throw err;
+          }
+          if (selectedOption && !question.options.some(option => option.id === selectedOption)) {
+            const err: any = new Error('Proctoring checkpoint contains an invalid selected option');
+            err.statusCode = 400;
+            throw err;
+          }
+          answers.push({
+            questionId: answer.questionId,
+            selectedOption,
+            markedForReview: Boolean(answer.markedForReview)
+          });
+        }
+        attempt.answers = answers;
+        if (Number.isInteger(state.currentQuestionIndex)) {
+          attempt.currentQuestionIndex = Math.max(
+            0,
+            Math.min(state.currentQuestionIndex!, Math.max(0, exam.questions.length - 1))
+          );
+        }
+      }
+
+      // Screenshot reminders and monitoring-only events do not count as violations.
+      const nonWarningEvents = ['SCREENSHOT_ATTEMPT', 'WINDOW_FOCUS', 'CAMERA_CONNECTED', 'FACE_DETECTED', 'FACE_STATUS'];
+      const wasSuspended = attempt.suspended;
+      if (!nonWarningEvents.includes(input.eventType)) {
+        attempt.warningCount = Math.min(5, (attempt.warningCount || 0) + 1);
+        if (attempt.warningCount >= 5) {
+          attempt.suspended = true;
+          attempt.proctoringStatus = 'SUSPENDED';
+        } else {
+          attempt.proctoringStatus = attempt.warningCount >= 3 ? 'FLAGGED' : 'WARNED';
+        }
+      }
+      if (input.eventType === 'CAMERA_OFF' || input.eventType === 'CAMERA_BLOCKED') {
+        attempt.cameraStatus = 'OFFLINE';
+      } else if (input.eventType === 'CAMERA_CONNECTED') {
+        attempt.cameraStatus = 'ACTIVE';
+      }
+      if (input.eventType === 'NO_FACE') attempt.faceStatus = 'NOT_DETECTED';
+      if (input.eventType === 'MULTIPLE_FACES') attempt.faceStatus = 'MULTIPLE';
+      if (input.eventType === 'FACE_DETECTED') attempt.faceStatus = 'DETECTED';
+      if (input.eventType === 'FULLSCREEN_EXIT') attempt.fullscreenActive = false;
+      if (input.eventType === 'WINDOW_BLUR' || input.eventType === 'TAB_SWITCH') {
+        attempt.lastHeartbeatAt = new Date();
+      }
+      const updatedAttempt = await ExamAttempt.findOneAndUpdate(
+        {
+          attemptId,
+          studentId: user.userId,
+          status: 'IN_PROGRESS',
+          deviceSessionId: input.deviceSessionId,
+          warningCount: originalWarningCount
+        },
+        {
+          $set: {
+            answers: attempt.answers,
+            currentQuestionIndex: attempt.currentQuestionIndex,
+            warningCount: attempt.warningCount,
+            suspended: attempt.suspended,
+            proctoringStatus: attempt.proctoringStatus,
+            cameraStatus: attempt.cameraStatus,
+            faceStatus: attempt.faceStatus,
+            fullscreenActive: attempt.fullscreenActive,
+            lastHeartbeatAt: attempt.lastHeartbeatAt
+          }
+        },
+        { returnDocument: 'after' }
+      );
+      if (!updatedAttempt) {
+        const err: any = new Error('Proctoring state changed concurrently; refresh the active attempt.');
+        err.statusCode = 409;
+        throw err;
+      }
+      attemptRecord = updatedAttempt;
+      attempt = updatedAttempt;
+      if (!wasSuspended && attempt.suspended) {
+        const student = await User.findOne({ userId: user.userId })
+          .select('managedBy teacherIds')
+          .lean();
+        const facultyIds = Array.from(new Set([
+          ...(student?.managedBy || []),
+          ...(student?.teacherIds || []),
+          exam.createdBy
+        ]));
+        emitToRooms(
+          ['role:ADMIN', `student:${user.userId}`, ...facultyIds.map(id => `teacher:${id}`)],
+          'attempt.suspended',
+          { attemptId, examId, studentId: user.userId, warningCount: attempt.warningCount },
+          user.userId
+        );
       }
     } else {
       // Verify student is assigned to exam
@@ -121,11 +239,29 @@ export class ProctoringService {
       eventType: input.eventType,
       severity,
       details: (input.details || input.eventType).trim(),
-      metadata: input.metadata || {},
+      metadata: input.metadata
+        ? Object.fromEntries(Object.entries(input.metadata).filter(([key]) => key !== 'attemptState'))
+        : {},
       timestamp: new Date()
     });
 
-    emitTeacherAndAdmin(exam.createdBy, 'proctoring.event', { event: eventDoc.toJSON() }, user.userId);
+    const student = await User.findOne({ userId: user.userId })
+      .select('managedBy teacherIds')
+      .lean();
+    const facultyIds = Array.from(new Set([
+      ...(student?.managedBy || []),
+      ...(student?.teacherIds || []),
+      exam.createdBy
+    ]));
+    emitTeacherAndAdmin(facultyIds, 'proctoring.event', { event: eventDoc.toJSON() }, user.userId);
+    if (attemptRecord) {
+      emitTeacherAndAdmin(
+        facultyIds,
+        'monitoring.updated',
+        { attempt: attemptRecord.toJSON() },
+        user.userId
+      );
+    }
 
     logger.info(`Proctoring event [${input.eventType}] logged for student ${user.userId} on exam ${examId}`);
     return eventDoc;
@@ -151,18 +287,34 @@ export class ProctoringService {
     }
 
     if (user.role === 'TEACHER') {
-      const teacherExams = await Exam.find({ createdBy: user.userId }).select('examId').lean();
+      const [teacherExams, assignedStudents] = await Promise.all([
+        Exam.find({ createdBy: user.userId }).select('examId').lean(),
+        User.find({
+          role: 'STUDENT',
+          $or: [{ managedBy: user.userId }, { teacherIds: user.userId }]
+        }).select('userId').lean()
+      ]);
       const teacherExamIds = teacherExams.map(e => e.examId);
+      const studentIds = assignedStudents.map(student => student.userId);
 
-      if (filters.examId && !teacherExamIds.includes(filters.examId)) {
-        const err: any = new Error('Forbidden: You do not own this examination');
-        err.statusCode = 403;
-        throw err;
+      if (filters.studentId && !studentIds.includes(filters.studentId)) {
+        const studentOwnsExam = await ExamAttempt.exists({ studentId: filters.studentId, examId: { $in: teacherExamIds } });
+        if (!studentOwnsExam) {
+          const err: any = new Error('Forbidden: This student is not assigned to you');
+          err.statusCode = 403;
+          throw err;
+        }
       }
 
-      const query: any = {
-        examId: filters.examId ? filters.examId : { $in: teacherExamIds }
+      const ownershipFilter = {
+        $or: [
+          { examId: filters.examId ? filters.examId : { $in: teacherExamIds } },
+          { studentId: { $in: studentIds } }
+        ]
       };
+      const query: any = filters.examId
+        ? { $and: [ownershipFilter, { examId: filters.examId }] }
+        : ownershipFilter;
       if (filters.studentId) query.studentId = filters.studentId;
       if (filters.attemptId) query.attemptId = filters.attemptId;
       return ProctoringEvent.find(query).sort({ timestamp: -1 });

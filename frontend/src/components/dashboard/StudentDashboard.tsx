@@ -83,6 +83,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const [selectedExam, setSelectedExam] = useState<ScheduledExam | null>(null);
   const [selectedResult, setSelectedResult] = useState<StudentResult | null>(null);
   const [selectedQuery, setSelectedQuery] = useState<StudentQuery | null>(null);
+  const [examListFilter, setExamListFilter] = useState<'ALL' | 'LIVE' | 'IN_PROGRESS'>('ALL');
 
   const loadProctoring = async () => {
     setIsLoadingProctoring(true);
@@ -140,6 +141,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       e.studentAttemptStatus !== 'TERMINATED' &&
       e.studentAttemptStatus !== 'EXPIRED'
   );
+  const visibleAvailableExams = availableExams.filter(exam => {
+    if (examListFilter === 'LIVE') return exam.status === 'LIVE';
+    if (examListFilter === 'IN_PROGRESS') return exam.studentAttemptStatus === 'IN_PROGRESS';
+    return true;
+  });
 
   const completedExams = exams.filter(
     e =>
@@ -299,6 +305,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
     exams: 'Exams',
     history: 'Exam History',
     results: 'Results',
+    analytics: 'Analytics',
     queries: 'Queries',
     proctoring: 'Proctoring Status',
     profile: 'Profile'
@@ -359,25 +366,34 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           {/* Student KPI Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             <KpiCard
-              label="Assigned Exams"
-              value={exams.length}
-              subValue={`${availableExams.length} Available to attempt`}
-              icon={<FileText className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
-              onClick={() => onNavigateTab('exams')}
-            />
-            <KpiCard
-              label="Upcoming & Live"
+              label="Available Exams"
               value={availableExams.length}
-              subValue={`${liveExamsCount} Live now`}
-              icon={<Clock className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />}
-              onClick={() => onNavigateTab('exams')}
+              subValue="Assigned and not yet completed"
+              icon={<FileText className="w-5 h-5 text-blue-600 dark:text-blue-400" />}
+              onClick={() => {
+                setExamListFilter('ALL');
+                onNavigateTab('exams');
+              }}
             />
             <KpiCard
-              label="Completed Exams"
-              value={completedExams.length}
-              subValue={`${publishedResults.length} Results published`}
+              label="Live Exams"
+              value={liveExamsCount}
+              subValue="Available to launch now"
+              icon={<Clock className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />}
+              onClick={() => {
+                setExamListFilter('LIVE');
+                onNavigateTab('exams');
+              }}
+            />
+            <KpiCard
+              label="In Progress"
+              value={inProgressExamsCount}
+              subValue="Resume a saved attempt"
               icon={<CheckCircle className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
-              onClick={() => onNavigateTab('history')}
+              onClick={() => {
+                setExamListFilter('IN_PROGRESS');
+                onNavigateTab('exams');
+              }}
             />
             <KpiCard
               label="Published Results"
@@ -429,6 +445,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                             {exam.examId || exam.id} · {exam.subject} · {exam.durationMinutes} mins ·{' '}
                             {exam.totalMarks} marks
                           </p>
+                          {isInProgress && (
+                            <p className="text-[12px] text-amber-700 dark:text-amber-300 mt-1">
+                              Exam {exam.title} — In Progress
+                              {exam.activeAttemptId ? ` · Attempt ${exam.activeAttemptId}` : ''}
+                            </p>
+                          )}
                         </div>
                         {isSubmitted ? (
                           <StatusBadge status={exam.studentAttemptStatus || 'SUBMITTED'} />
@@ -536,12 +558,22 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Assigned Exams ({availableExams.length})
+                Available Exams ({visibleAvailableExams.length})
               </h2>
+              <select
+                aria-label="Filter exams"
+                value={examListFilter}
+                onChange={event => setExamListFilter(event.target.value as typeof examListFilter)}
+                className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <option value="ALL">All available</option>
+                <option value="LIVE">Live</option>
+                <option value="IN_PROGRESS">In progress</option>
+              </select>
             </div>
 
-          {availableExams.length === 0 ? (
-            <EmptyState message="No exams yet." />
+          {visibleAvailableExams.length === 0 ? (
+            <EmptyState message={availableExams.length ? 'No exams match this filter.' : 'No exams yet.'} />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
@@ -558,7 +590,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {availableExams.map(exam => {
+                  {visibleAvailableExams.map(exam => {
                     const isInProgress = exam.studentAttemptStatus === 'IN_PROGRESS';
                     const exId = exam.examId || exam.id;
                     return (
@@ -574,6 +606,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                         </td>
                         <td className="py-4 px-4 font-medium text-slate-900 dark:text-white">
                           {exam.title}
+                          {isInProgress && (
+                            <span className="block mt-1 text-[12px] font-normal text-amber-700 dark:text-amber-300">
+                              In Progress{exam.activeAttemptId ? ` · Attempt ${exam.activeAttemptId}` : ''}
+                            </span>
+                          )}
                         </td>
                         <td className="py-4 px-4 text-slate-600 dark:text-slate-300">{exam.subject}</td>
                         <td className="py-4 px-4 text-[14px] text-slate-500 whitespace-nowrap tabular-nums">
@@ -830,15 +867,20 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
             )}
           </div>
 
-          {publishedResults.length > 0 && (
-            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-              <h3 className="text-[20px] font-semibold text-slate-900 dark:text-white mb-4 leading-snug">
-                Performance Trend
-              </h3>
-              <PerformanceTrendChart data={publishedResults} />
-            </div>
-          )}
         </div>
+      )}
+
+      {activeTab === 'analytics' && (
+        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
+          <h2 className="mb-2 text-[20px] font-semibold text-slate-900 dark:text-white">
+            Performance trend
+          </h2>
+          {publishedResults.length < 2 ? (
+            <EmptyState message="Complete more exams to see your performance trend." />
+          ) : (
+            <PerformanceTrendChart data={[...publishedResults].reverse()} />
+          )}
+        </section>
       )}
 
       {/* 5. QUERIES TAB */}
@@ -1036,96 +1078,60 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
 
       {/* 7. PROFILE TAB */}
       {activeTab === 'profile' && (
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 max-w-2xl">
-          <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white mb-5 leading-snug">
-            Student Profile
-          </h2>
-          <div className="space-y-3.5 text-[15px]">
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Student ID</span>
-              <span className="font-mono font-medium text-slate-900 dark:text-white tabular-nums">
-                {user.userId || user.id}
-              </span>
+        <div className="space-y-5">
+          <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex min-w-0 items-center gap-4">
+              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-blue-100 text-lg font-bold text-blue-700 dark:bg-blue-900/50 dark:text-blue-200">
+                {user.name.split(/\s+/).map(part => part[0]).slice(0, 2).join('').toUpperCase()}
+              </div>
+              <div className="min-w-0">
+                <h2 className="truncate text-xl font-semibold text-slate-900 dark:text-white">{user.name}</h2>
+                <p className="mt-1 font-mono text-xs text-slate-500">{user.userId || user.id} · Student</p>
+                <div className="mt-2"><StatusBadge status={user.status || 'ACTIVE'} /></div>
+              </div>
             </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Full Name</span>
-              <span className="font-medium text-slate-900 dark:text-white">{user.name}</span>
-            </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Email</span>
-              <span className="font-medium text-slate-900 dark:text-white">
-                {user.email || '—'}
-              </span>
-            </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Role</span>
-              <span className="font-medium text-slate-900 dark:text-white">{user.role}</span>
-            </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Course / Program</span>
-              <span className="font-medium text-slate-900 dark:text-white">
-                {user.course || '—'}
-              </span>
-            </div>
-            <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-              <span className="text-slate-500">Department</span>
-              <span className="font-medium text-slate-900 dark:text-white">
-                {user.department || '—'}
-              </span>
-            </div>
-            <div className="flex justify-between py-2.5">
-              <span className="text-slate-500">Status</span>
-              <StatusBadge status={user.status || 'ACTIVE'} />
-            </div>
-          </div>
-          <form onSubmit={handleChangePassword} className="mt-8 border-t border-slate-200 pt-6 dark:border-slate-700">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Change password</h3>
-            <div className="mt-4 space-y-3">
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={event => setCurrentPassword(event.target.value)}
-                placeholder="Current password"
-                required
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-              />
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={event => setNewPassword(event.target.value)}
-                placeholder="New password (at least 8 characters)"
-                minLength={8}
-                maxLength={72}
-                required
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-              />
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={confirmNewPassword}
-                onChange={event => setConfirmNewPassword(event.target.value)}
-                placeholder="Confirm new password"
-                minLength={8}
-                maxLength={72}
-                required
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-              />
-              {passwordChangeMessage && (
-                <p role="status" className="text-sm text-slate-600 dark:text-slate-300">
-                  {passwordChangeMessage}
-                </p>
-              )}
-              <button
-                type="submit"
-                disabled={isChangingPassword}
-                className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isChangingPassword ? 'Changing password...' : 'Change password'}
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => void handleRefresh()} disabled={isRefreshing} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700">
+                <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} /> Refresh
               </button>
             </div>
-          </form>
+          </section>
+
+          <section className="max-w-2xl rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+              <h3 className="mb-4 text-base font-semibold text-slate-900 dark:text-white">Profile information</h3>
+              <dl className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
+                {[
+                  ['Student ID', user.userId || user.id],
+                  ['Email', user.email || '—'],
+                  ['Phone', user.phone || '—'],
+                  ['Course', user.course || '—'],
+                  ['Department', user.department || '—'],
+                  ['Semester', user.semester || '—'],
+                  ['Academic year', user.academicYear || '—']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex justify-between gap-4 py-2.5">
+                    <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
+                    <dd className="text-right font-medium text-slate-800 dark:text-slate-200">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+            <h3 className="mb-3 text-base font-semibold text-slate-900 dark:text-white">Security</h3>
+            <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">Update your account password. ExamX will never display your password.</p>
+            <form onSubmit={handleChangePassword} className="grid gap-3 md:grid-cols-3">
+              <input type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} placeholder="Current password" required className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white" />
+              <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="New password (at least 8 characters)" minLength={8} maxLength={72} required className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white" />
+              <input type="password" autoComplete="new-password" value={confirmNewPassword} onChange={event => setConfirmNewPassword(event.target.value)} placeholder="Confirm new password" minLength={8} maxLength={72} required className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white" />
+              <div className="flex flex-wrap items-center gap-3 md:col-span-3">
+                <button type="submit" disabled={isChangingPassword} className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+                  {isChangingPassword ? 'Changing password...' : 'Change password'}
+                </button>
+                {passwordChangeMessage && <p role="status" className="text-sm text-slate-600 dark:text-slate-300">{passwordChangeMessage}</p>}
+              </div>
+            </form>
+          </section>
         </div>
       )}
 

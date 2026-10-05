@@ -6,6 +6,7 @@ import { JwtUserPayload } from '../types/auth.types';
 import { generateNextUnblockRequestId } from '../utils/exam-id.generator';
 import { emitToRooms, emitTeacherAndAdmin, emitStudentTeacherAdmin } from '../realtime/socket';
 import { AuditService } from './audit.service';
+import { AttemptService } from './attempt.service';
 import { logger } from '../utils/logger';
 
 export class UnblockService {
@@ -17,6 +18,7 @@ export class UnblockService {
       attemptId: string;
       examId: string;
       reason: string;
+      deviceSessionId?: string;
     },
     user: JwtUserPayload
   ): Promise<IUnblockRequestDocument> {
@@ -57,10 +59,50 @@ export class UnblockService {
       err.statusCode = 404;
       throw err;
     }
+    if (!exam) {
+      const err: any = new Error(`Exam ${examId} not found`);
+      err.statusCode = 404;
+      throw err;
+    }
 
     if (attempt.studentId !== user.userId) {
       const err: any = new Error('Forbidden: You can only request unblock for your own examination attempts');
       err.statusCode = 403;
+      throw err;
+    }
+    if (attempt.examId !== examId || !attempt.suspended || attempt.status !== 'IN_PROGRESS') {
+      const err: any = new Error('Faculty assistance is available only for your currently suspended attempt');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (!input.deviceSessionId || attempt.deviceSessionId !== input.deviceSessionId) {
+      const err: any = new Error('This examination attempt is active in another browser or device.');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const student = await User.findOne({ userId: user.userId, role: 'STUDENT' })
+      .select('managedBy teacherIds')
+      .lean();
+    const facultyIds = Array.from(new Set([
+      ...(student?.managedBy || []),
+      ...(student?.teacherIds || [])
+    ]));
+    const candidates = Array.from(new Set([exam.createdBy, ...facultyIds]));
+    const faculty = await User.findOne({
+      userId: { $in: candidates },
+      role: 'TEACHER',
+      status: 'ACTIVE'
+    }).select('userId').lean();
+    const assignedFacultyId =
+      faculty?.userId && facultyIds.includes(faculty.userId)
+        ? faculty.userId
+        : faculty?.userId === exam.createdBy
+        ? exam.createdBy
+        : '';
+    if (!assignedFacultyId) {
+      const err: any = new Error('No faculty member is assigned to review this student');
+      err.statusCode = 409;
       throw err;
     }
 
@@ -80,17 +122,13 @@ export class UnblockService {
       examTitle: exam?.title || 'Examination',
       studentId: user.userId,
       studentName: user.name,
+      assignedFacultyId,
       reason: input.reason.trim(),
       status: 'PENDING',
-      warningCount: attempt.warningCount || 6
+      warningCount: attempt.warningCount || 5
     });
 
-    // Notify exam teacher and admins
-    if (exam?.createdBy) {
-      emitTeacherAndAdmin(exam.createdBy, 'unblock.created', { request: doc.toJSON() }, user.userId);
-    } else {
-      emitToRooms(['role:ADMIN'], 'unblock.created', { request: doc.toJSON() }, user.userId);
-    }
+    emitTeacherAndAdmin(assignedFacultyId, 'unblock.created', { request: doc.toJSON() }, user.userId);
 
     await AuditService.logAction({
       action: 'UNBLOCK_REQUEST_SUBMITTED',
@@ -121,23 +159,7 @@ export class UnblockService {
     }
 
     if (user.role === 'TEACHER') {
-      const [teacherExams, supervisedStudents] = await Promise.all([
-        Exam.find({ createdBy: user.userId }).select('examId').lean(),
-        User.find({
-          role: 'STUDENT',
-          $or: [{ managedBy: user.userId }, { teacherIds: user.userId }]
-        }).select('userId').lean()
-      ]);
-
-      const examIds = teacherExams.map(e => e.examId);
-      const studentIds = supervisedStudents.map(s => s.userId);
-
-      const query: any = {
-        $or: [
-          { examId: { $in: examIds } },
-          { studentId: { $in: studentIds } }
-        ]
-      };
+      const query: any = { assignedFacultyId: user.userId };
 
       if (filters.examId) query.examId = filters.examId;
       if (filters.studentId) query.studentId = filters.studentId;
@@ -174,55 +196,158 @@ export class UnblockService {
       throw err;
     }
 
-    const doc = await UnblockRequest.findOne({ requestId });
+    let doc = await UnblockRequest.findOne({ requestId });
     if (!doc) {
       const err: any = new Error(`Unblock request ${requestId} not found`);
       err.statusCode = 404;
       throw err;
     }
 
-    const exam = await Exam.findOne({ examId: doc.examId });
-
-    if (user.role === 'TEACHER') {
-      const isExamOwner = exam?.createdBy === user.userId;
-      const studentDoc = await User.findOne({ userId: doc.studentId }).lean();
-      const isSupervised =
-        Array.isArray(studentDoc?.managedBy) && studentDoc.managedBy.includes(user.userId);
-
-      if (!isExamOwner && !isSupervised) {
-        const err: any = new Error('Forbidden: You are not authorized to review unblock requests for this candidate');
-        err.statusCode = 403;
-        throw err;
-      }
+    if (doc.status !== 'PENDING') {
+      const err: any = new Error(`Assistance request is already ${doc.status.toLowerCase()}`);
+      err.statusCode = 409;
+      throw err;
     }
 
-    doc.status = decision.status;
-    doc.reviewedBy = user.userId;
-    doc.reviewedByName = user.name;
-    doc.reviewedAt = new Date();
-    doc.remarks = (decision.remarks || '').trim();
-    await doc.save();
+    if (user.role === 'TEACHER' && doc.assignedFacultyId !== user.userId) {
+      const err: any = new Error('Forbidden: This assistance request is not assigned to you');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const attempt = await ExamAttempt.findOne({ attemptId: doc.attemptId });
+
+    if (
+      decision.status === 'APPROVED' &&
+      (!attempt || attempt.status !== 'IN_PROGRESS' || attempt.expiresAt.getTime() <= Date.now())
+    ) {
+      const err: any = new Error('This examination attempt has expired or is no longer resumable');
+      err.statusCode = 409;
+      throw err;
+    }
+    if (
+      decision.status === 'REJECTED' &&
+      (!attempt || attempt.status !== 'IN_PROGRESS' || !attempt.suspended)
+    ) {
+      const err: any = new Error('This assistance request is no longer associated with a suspended active attempt');
+      err.statusCode = 409;
+      throw err;
+    }
+
+    const reviewedRequest = await UnblockRequest.findOneAndUpdate(
+      { requestId, status: 'PENDING' },
+      {
+        $set: {
+          status: decision.status,
+          reviewedBy: user.userId,
+          reviewedByName: user.name,
+          reviewedAt: new Date(),
+          remarks: (decision.remarks || '').trim()
+        }
+      },
+      { returnDocument: 'after' }
+    );
+    if (!reviewedRequest) {
+      const err: any = new Error('Assistance request has already been reviewed');
+      err.statusCode = 409;
+      throw err;
+    }
+    doc = reviewedRequest;
 
     // If APPROVED, unblock the attempt and allow student to continue
     if (decision.status === 'APPROVED') {
-      const attempt = await ExamAttempt.findOne({ attemptId: doc.attemptId });
-      if (attempt) {
-        attempt.status = 'IN_PROGRESS';
-        attempt.proctoringStatus = 'WARNED';
-        // Cap warning count at 5 so student can continue without being blocked instantly
-        attempt.warningCount = Math.min(attempt.warningCount || 0, 5);
-        await attempt.save();
+      attempt!.proctoringStatus = 'WARNED';
+      attempt!.suspended = false;
+      attempt!.lastHeartbeatAt = new Date();
+      await attempt!.save();
+    }
+
+    let rejectionMessage: string | undefined;
+    let submittedAttempt: any;
+    let resultId: string | undefined;
+    if (decision.status === 'REJECTED') {
+      if (!attempt) {
+        const err: any = new Error('The examination attempt could not be found for submission');
+        err.statusCode = 409;
+        throw err;
       }
+      const claimedAttempt = await ExamAttempt.findOneAndUpdate(
+        { attemptId: doc.attemptId, status: 'IN_PROGRESS', suspended: true },
+        {
+          $set: {
+            status: 'SUBMITTED',
+            submittedAt: new Date(),
+            suspended: false,
+            cameraStatus: 'OFFLINE'
+          }
+        },
+        { returnDocument: 'after' }
+      );
+      if (!claimedAttempt) {
+        const err: any = new Error('The suspended attempt is no longer available for faculty rejection');
+        err.statusCode = 409;
+        throw err;
+      }
+      const exam = await Exam.findOne({ examId: claimedAttempt.examId });
+      if (!exam) {
+        const err: any = new Error('The examination associated with this attempt could not be found');
+        err.statusCode = 409;
+        throw err;
+      }
+      const evaluated = await AttemptService.evaluateAndCreateResult(
+        claimedAttempt,
+        exam,
+        claimedAttempt.answers || [],
+        'SUBMITTED'
+      );
+      submittedAttempt = evaluated.attempt.toJSON();
+      resultId = evaluated.result.resultId;
+      rejectionMessage = 'Your assistance request was rejected. Your exam has been submitted.';
     }
 
     // Realtime notification to student and teacher
     emitStudentTeacherAdmin(
       doc.studentId,
-      exam?.createdBy ? [exam.createdBy] : [],
+      [doc.assignedFacultyId],
       'unblock.updated',
-      { request: doc.toJSON() },
+      {
+        request: doc.toJSON(),
+        attempt: submittedAttempt,
+        resultId,
+        message:
+          decision.status === 'APPROVED'
+            ? 'Faculty has approved your request.'
+            : rejectionMessage
+      },
       user.userId
     );
+    if (decision.status === 'APPROVED') {
+      emitToRooms(
+        ['role:ADMIN', `teacher:${doc.assignedFacultyId}`, `student:${doc.studentId}`],
+        'attempt.resumed',
+        {
+          attemptId: doc.attemptId,
+          examId: doc.examId,
+          studentId: doc.studentId,
+          message: 'Faculty has approved your request.'
+        },
+        user.userId
+      );
+    } else {
+      emitToRooms(
+        ['role:ADMIN', `teacher:${doc.assignedFacultyId}`, `student:${doc.studentId}`],
+        'attempt.submitted',
+        {
+          attemptId: doc.attemptId,
+          examId: doc.examId,
+          studentId: doc.studentId,
+          attempt: submittedAttempt,
+          resultId,
+          message: rejectionMessage
+        },
+        user.userId
+      );
+    }
 
     await AuditService.logAction({
       action: decision.status === 'APPROVED' ? 'UNBLOCK_REQUEST_APPROVED' : 'UNBLOCK_REQUEST_REJECTED',

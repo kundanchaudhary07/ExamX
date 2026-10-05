@@ -26,7 +26,8 @@ async function runPhase13Tests() {
     token?: string
   ): Promise<{ status: number; body: any }> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'X-ExamX-Device-Session': '00000000-0000-4000-8000-000000000001'
     };
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;

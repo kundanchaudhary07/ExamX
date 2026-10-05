@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import JSZip from 'jszip';
 import { getMaxSyllabusFileSizeBytes, validateAndExtractSyllabus } from '../src/utils/syllabusExtractor';
+import { extractSyllabusUnits, normalizeSyllabusUnit } from '../src/utils/syllabusUnits';
 
 const syllabusText = 'UNIT I: Computer architecture and digital systems. Processor organization includes arithmetic logic units, control units, registers, memory hierarchy, instruction cycles, addressing modes, and input output systems.';
 
@@ -17,6 +18,14 @@ async function makeDocx(text: string): Promise<Buffer> {
 }
 
 async function run(): Promise<void> {
+  const units = extractSyllabusUnits(
+    'UNIT I: Computer architecture\nProcessor organization uses registers and memory.\n\nUNIT II - Digital systems\nLogic gates implement Boolean operations.'
+  );
+  assert.deepEqual(units.map((unit) => unit.name), ['UNIT I', 'UNIT II']);
+  assert(units[0].text.includes('Processor organization'));
+  assert(!units[0].text.includes('Boolean operations'));
+  assert.equal(normalizeSyllabusUnit('Unit II: Digital systems'), normalizeSyllabusUnit('UNIT 2'));
+
   const txt = await validateAndExtractSyllabus(file('architecture.txt', 'text/plain', Buffer.from(syllabusText)));
   assert.equal(txt.fileType, 'TXT');
   assert(txt.text.includes('Processor organization'));

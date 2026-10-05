@@ -11,6 +11,8 @@ export interface IResultAnswerBreakdown {
   isCorrect: boolean;
   marksAwarded: number;
   maxMarks: number;
+  excluded?: boolean;
+  negativeMarks?: number;
 }
 
 export interface IResultDocument extends Document {
@@ -49,7 +51,9 @@ const ResultAnswerSchema = new Schema<IResultAnswerBreakdown>(
     correctOption: { type: String, default: '' },
     isCorrect: { type: Boolean, default: false },
     marksAwarded: { type: Number, default: 0 },
-    maxMarks: { type: Number, default: 1 }
+    maxMarks: { type: Number, default: 1 },
+    excluded: { type: Boolean, default: false },
+    negativeMarks: { type: Number, default: 0 }
   },
   { _id: false }
 );

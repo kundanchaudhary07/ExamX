@@ -7,12 +7,12 @@ export interface GenerateQuestionsOptions {
   course: string;
   semester: string;
   topic?: string;
+  selectedUnits?: string[];
   questionType?: 'MCQ';
 }
 
 /**
- * Generates adaptive assessment questions exclusively via the secure backend AI service.
- * Generates only from an already uploaded, server-persisted syllabus.
+ * Generates questions through the backend using its configured AI provider and a persisted syllabus.
  */
 export const generateAdaptiveQuestions = async (
   topic: string,
@@ -25,6 +25,7 @@ export const generateAdaptiveQuestions = async (
     syllabusId: options.syllabusId,
     subject: options.subject,
     topic: options.topic || topic,
+    selectedUnits: options.selectedUnits,
     course: options.course,
     semester: options.semester,
     difficulty,

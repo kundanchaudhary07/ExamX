@@ -24,7 +24,7 @@ export interface IQuestionDocument extends Document {
   syllabusTopic?: string;
   sourceReference?: string;
   generationId?: string;
-  aiProvider?: 'GEMINI' | 'GROQ';
+  aiProvider?: 'GROQ';
   aiModel?: string;
   dedupeKey?: string;
   approvedBy?: string;
@@ -150,7 +150,7 @@ const QuestionSchema = new Schema<IQuestionDocument>(
     syllabusTopic: { type: String, trim: true },
     sourceReference: { type: String, trim: true },
     generationId: { type: String, trim: true, index: true },
-    aiProvider: { type: String, enum: ['GEMINI', 'GROQ'] },
+    aiProvider: { type: String, enum: ['GROQ'] },
     aiModel: { type: String, trim: true },
     dedupeKey: { type: String, unique: true, sparse: true, select: false },
     approvedBy: { type: String },

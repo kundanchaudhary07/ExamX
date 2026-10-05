@@ -6,6 +6,7 @@ import {
   GroqContentClient
 } from '../src/services/ai.service';
 import { AuditLog } from '../src/models/AuditLog';
+import { AiGenerationBatch } from '../src/models/AiGenerationBatch';
 import { Question } from '../src/models/Question';
 import { Syllabus } from '../src/models/Syllabus';
 import { JwtUserPayload } from '../src/types/auth.types';
@@ -73,14 +74,11 @@ const mediumLengthDbmsSyllabus = Array.from(
 ).join(' ');
 
 async function run(): Promise<void> {
-  const originalProvider = process.env.AI_PROVIDER;
   const originalGroqKey = process.env.GROQ_API_KEY;
-  const originalGeminiKey = process.env.GEMINI_API_KEY;
   const mongoUri = process.env.MONGODB_URI;
   let syllabusId = '';
   let questionIds: string[] = [];
 
-  process.env.AI_PROVIDER = 'GROQ';
   process.env.GROQ_API_KEY = 'test-only-groq-placeholder';
 
   try {
@@ -142,8 +140,8 @@ async function run(): Promise<void> {
           'Artificial Intelligence',
           'The syllabus describes foundational concepts and learning outcomes for the course.'
         ).compatible,
-        true,
-        'Ambiguous syllabus content is not blocked'
+        false,
+        'A syllabus without evidence for the selected subject must be rejected'
       );
 
       let providerCalls = 0;
@@ -161,10 +159,79 @@ async function run(): Promise<void> {
         (error: any) =>
           error.statusCode === 422 &&
           error.code === 'SYLLABUS_SUBJECT_MISMATCH' &&
-          /Selected subject: Artificial Intelligence/.test(error.message) &&
-          /Detected syllabus topic: Cloud Microservices/.test(error.message)
+          error.message === 'You have uploaded/selected the wrong subject. Please upload the syllabus for the selected subject.'
       );
       assert.equal(providerCalls, 0, 'A high-confidence mismatch is rejected before the Groq request');
+    }
+
+    {
+      const scopedSyllabus = [
+        'UNIT I: Data structures',
+        'Arrays store values in contiguous memory locations.',
+        'UNIT II: Graph algorithms',
+        'Graphs contain vertices and edges. Breadth-first search traverses graph structures.'
+      ].join('\n');
+      let submittedPrompt = '';
+      const scopedClient = groqClient(async (request) => {
+        submittedPrompt = request.messages[1].content;
+        return {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                questions: [{
+                  ...generatedResponse().questions[0],
+                  topic: 'all',
+                  syllabusUnit: 'UNIT 2',
+                  syllabusTopic: 'Breadth-first search',
+                  sourceReference: 'Breadth-first search traverses graph structures.'
+                }]
+              })
+            }
+          }]
+        };
+      });
+      const scoped = await AiQuestionService.generateQuestionsForReview({
+        ...generationParams,
+        topic: 'all',
+        syllabusText: scopedSyllabus,
+        selectedUnits: ['UNIT II']
+      }, scopedClient, noWait);
+      assert.equal(scoped.drafts[0].syllabusUnit, 'UNIT 2');
+      assert(submittedPrompt.includes('UNIT II: Graph algorithms'));
+      assert(!submittedPrompt.includes('Arrays store values'));
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          topic: 'all',
+          syllabusText: scopedSyllabus,
+          selectedUnits: ['UNIT III']
+        }, scopedClient, noWait),
+        (error: any) => error.statusCode === 400 && error.code === 'AI_INVALID_REQUEST'
+      );
+      const crossUnitClient = groqClient(async () => ({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              questions: [{
+                ...generatedResponse().questions[0],
+                topic: 'all',
+                syllabusUnit: 'UNIT I',
+                syllabusTopic: 'Arrays',
+                sourceReference: 'Breadth-first search traverses graph structures.'
+              }]
+            })
+          }
+        }]
+      }));
+      await assert.rejects(
+        () => AiQuestionService.generateQuestionsForReview({
+          ...generationParams,
+          topic: 'all',
+          syllabusText: scopedSyllabus,
+          selectedUnits: ['UNIT II']
+        }, crossUnitClient, noWait),
+        (error: any) => error.statusCode === 502 && error.code === 'AI_INVALID_RESPONSE'
+      );
     }
 
     {
@@ -313,13 +380,13 @@ async function run(): Promise<void> {
         () => callProviderWithTransientRetries(async () => {
           calls += 1;
           throw Object.assign(new Error(`provider status ${status}`), { status });
-        }, noWait, 'openai/gpt-oss-120b', 'GROQ'),
+        }, noWait, 'openai/gpt-oss-120b'),
         (error: any) => error.status === status
       );
       assert.equal(calls, 3, `Transient HTTP ${status} retries are bounded at three attempts`);
     }
     assert.equal(
-      await callProviderWithTransientRetries(async () => 'recovered', noWait, 'openai/gpt-oss-120b', 'GROQ'),
+      await callProviderWithTransientRetries(async () => 'recovered', noWait, 'openai/gpt-oss-120b'),
       'recovered'
     );
 
@@ -381,6 +448,7 @@ async function run(): Promise<void> {
       release();
       const result = await firstGeneration;
       assert.equal(result.generated.length, 1);
+      assert.deepEqual(result.generationBatch.selectedUnits, ['UNIT 1']);
       questionIds = result.generated.map((question) => question.questionId);
       const draft = result.generated[0];
       assert.equal(draft.status, 'DRAFT');
@@ -445,6 +513,7 @@ async function run(): Promise<void> {
     }
     if (syllabusId) {
       await Question.deleteMany({ syllabusId });
+      await AiGenerationBatch.deleteMany({ syllabusId });
       await Syllabus.deleteOne({ syllabusId });
       await AuditLog.deleteMany({ targetId: syllabusId, actorId: { $regex: /^groq-teacher-/ } });
       if (questionIds.length) {
@@ -452,12 +521,8 @@ async function run(): Promise<void> {
       }
     }
     if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
-    if (originalProvider === undefined) delete process.env.AI_PROVIDER;
-    else process.env.AI_PROVIDER = originalProvider;
     if (originalGroqKey === undefined) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = originalGroqKey;
-    if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
-    else process.env.GEMINI_API_KEY = originalGeminiKey;
   }
 }
 

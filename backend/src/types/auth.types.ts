@@ -12,4 +12,5 @@ export interface JwtUserPayload {
 
 export interface AuthenticatedRequest extends Request {
   user?: JwtUserPayload;
+  deviceSessionId?: string;
 }

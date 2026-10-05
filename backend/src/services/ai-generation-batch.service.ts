@@ -12,13 +12,14 @@ type BatchInput = {
   course: string;
   semester: string;
   topic: string;
+  selectedUnits?: string[];
   difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'MIXED';
   marksPerQuestion: number;
   requestedCount: number;
   generatedCount: number;
   syllabusId: string;
   sourceFileName: string;
-  provider: 'GEMINI' | 'GROQ';
+  provider: 'GROQ';
   aiModel: string;
 };
 
@@ -30,13 +31,14 @@ type BatchSummary = {
   course: string;
   semester: string;
   topic: string;
+  selectedUnits?: string[];
   difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'MIXED';
   marksPerQuestion: number;
   requestedCount: number;
   generatedCount: number;
   syllabusId: string;
   sourceFileName: string;
-  provider: 'GEMINI' | 'GROQ';
+  provider: 'GROQ';
   aiModel: string;
   generatedAt: Date;
   pendingCount: number;
@@ -161,13 +163,13 @@ export class AiGenerationBatchService {
         !Number.isInteger(generatedCount) ||
         generatedCount < 1 ||
         generatedCount > 200 ||
-        (provider !== 'GEMINI' && provider !== 'GROQ') ||
+        provider !== 'GROQ' ||
         typeof details.model !== 'string' ||
         !details.model.trim()
       ) {
         return [];
       }
-      return [{ audit, details, syllabusId, generatedCount, provider: provider as 'GEMINI' | 'GROQ' }];
+      return [{ audit, details, syllabusId, generatedCount, provider: 'GROQ' as const }];
     });
     if (!candidates.length) return [];
 

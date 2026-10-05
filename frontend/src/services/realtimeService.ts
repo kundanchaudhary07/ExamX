@@ -20,6 +20,7 @@ export type RealtimeEventName =
   | 'question.deleted'
   | 'result.created'
   | 'result.published'
+  | 'results.bulkPublished'
   | 'result.updated'
   | 'query.created'
   | 'query.updated'
@@ -27,6 +28,12 @@ export type RealtimeEventName =
   | 'proctoring.started'
   | 'proctoring.event'
   | 'proctoring.completed'
+  | 'unblock.created'
+  | 'unblock.updated'
+  | 'attempt.suspended'
+  | 'attempt.resumed'
+  | 'attempt.submitted'
+  | 'monitoring.updated'
   | 'audit.created'
   | 'notification.created';
 
@@ -144,6 +151,10 @@ class RealtimeService {
     return () => {
       this.statusListeners.delete(listener);
     };
+  }
+
+  isConnected(): boolean {
+    return Boolean(this.socket?.connected);
   }
 
   private notifyStatus(status: { connected: boolean; reconnected?: boolean; error?: string | null }): void {

@@ -22,7 +22,8 @@ router.post(
         });
         return;
       }
-      const result = await AttemptService.startAttempt(examId, req.user!);
+      const deviceSessionId = req.get('X-ExamX-Device-Session') || req.body?.deviceSessionId || '';
+      const result = await AttemptService.startAttempt(examId, req.user!, deviceSessionId);
       res.status(201).json({
         success: true,
         data: result
@@ -76,7 +77,8 @@ router.get(
     try {
       const result = await AttemptService.getAttemptById(
         req.params.attemptId as string,
-        req.user!
+        req.user!,
+        req.get('X-ExamX-Device-Session') || ''
       );
       res.status(200).json({
         success: true,
@@ -98,7 +100,14 @@ router.patch(
       const result = await AttemptService.saveProgressAnswers(
         req.params.attemptId as string,
         answers,
-        req.user!
+        req.user!,
+        {
+          currentQuestionIndex: req.body?.currentQuestionIndex,
+          cameraStatus: req.body?.cameraStatus,
+          faceStatus: req.body?.faceStatus,
+          fullscreenActive: req.body?.fullscreenActive,
+          deviceSessionId: req.get('X-ExamX-Device-Session') || ''
+        }
       );
       res.status(200).json({
         success: true,
@@ -119,12 +128,41 @@ router.post(
       const result = await AttemptService.saveProgressAnswers(
         req.params.attemptId as string,
         answers,
-        req.user!
+        req.user!,
+        {
+          currentQuestionIndex: req.body?.currentQuestionIndex,
+          cameraStatus: req.body?.cameraStatus,
+          faceStatus: req.body?.faceStatus,
+          fullscreenActive: req.body?.fullscreenActive,
+          deviceSessionId: req.get('X-ExamX-Device-Session') || ''
+        }
       );
       res.status(200).json({
         success: true,
         data: result
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.post(
+  '/:attemptId/heartbeat',
+  requireRole('STUDENT'),
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await AttemptService.recordHeartbeat(
+        req.params.attemptId as string,
+        req.user!,
+        {
+          cameraStatus: req.body?.cameraStatus,
+          faceStatus: req.body?.faceStatus,
+          fullscreenActive: req.body?.fullscreenActive,
+          deviceSessionId: req.get('X-ExamX-Device-Session') || ''
+        }
+      );
+      res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);
     }
@@ -147,7 +185,8 @@ router.post(
           answers: req.body?.answers,
           terminateReason
         },
-        req.user!
+        req.user!,
+        req.get('X-ExamX-Device-Session') || ''
       );
       res.status(200).json({
         success: true,

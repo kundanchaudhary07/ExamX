@@ -1,4 +1,3 @@
-import { GoogleGenAI, Type } from '@google/genai';
 import Groq from 'groq-sdk';
 import { QuestionDifficulty, QuestionOption } from '../types/exam.types';
 import { JwtUserPayload } from '../types/auth.types';
@@ -17,6 +16,7 @@ import {
   createSyllabusSubjectMismatchError
 } from '../utils/syllabusSubjectCompatibility';
 import { logger } from '../utils/logger';
+import { extractSyllabusUnits, normalizeSyllabusUnit } from '../utils/syllabusUnits';
 
 export interface IGeneratedQuestionDraft {
   questionText: string;
@@ -37,7 +37,7 @@ export interface IGeneratedQuestionDraft {
   syllabusUnit: string;
   syllabusTopic: string;
   sourceReference: string;
-  aiProvider: 'GEMINI' | 'GROQ';
+  aiProvider: 'GROQ';
   aiModel: string;
   reviewStatus: 'PENDING_TEACHER_REVIEW';
 }
@@ -54,15 +54,10 @@ type GenerationParams = {
   count?: number;
   marks?: number;
   negativeMarks?: number;
+  selectedUnits?: string[];
 };
 
-export interface GeminiContentClient {
-  models: {
-    generateContent(request: any): Promise<{ text?: string }>;
-  };
-}
-
-export interface GeminiRetryHooks {
+export interface RetryHooks {
   wait?: (milliseconds: number) => Promise<void>;
   random?: () => number;
 }
@@ -77,11 +72,9 @@ export interface GroqContentClient {
   };
 }
 
-type AiProvider = 'GEMINI' | 'GROQ';
-type AiProviderClient = GeminiContentClient | GroqContentClient;
-type RetryHooks = GeminiRetryHooks;
+type AiProvider = 'GROQ';
+type AiProviderClient = GroqContentClient;
 type GenerationProviderResponse = {
-  text?: string;
   choices?: Array<{ message?: { content?: string | null } }>;
 };
 
@@ -97,23 +90,6 @@ export function validateQuestionCount(value: unknown): number {
 }
 
 const GROQ_MODEL = 'openai/gpt-oss-120b';
-const GEMINI_MODEL = 'gemini-3.8-flash';
-
-function resolveAiProvider(): AiProvider {
-  const configuredProvider = process.env.AI_PROVIDER?.trim().toUpperCase();
-  if (configuredProvider && configuredProvider !== 'GEMINI' && configuredProvider !== 'GROQ') {
-    const err: any = new Error('AI_PROVIDER must be set to GEMINI or GROQ.');
-    err.statusCode = 500;
-    err.code = 'AI_PROVIDER_INVALID_CONFIG';
-    throw err;
-  }
-  if (configuredProvider === 'GEMINI' || configuredProvider === 'GROQ') return configuredProvider;
-  return 'GEMINI';
-}
-
-function providerModel(provider: AiProvider): string {
-  return provider === 'GROQ' ? GROQ_MODEL : GEMINI_MODEL;
-}
 
 const GROQ_QUESTION_JSON_SCHEMA = {
   type: 'object',
@@ -244,9 +220,9 @@ export function isTransientProviderError(error: any): boolean {
 export async function callProviderWithTransientRetries<T>(
   operation: (attempt?: number) => Promise<T>,
   hooks: RetryHooks = {},
-  modelName = GEMINI_MODEL,
-  provider: AiProvider = 'GEMINI'
+  modelName = GROQ_MODEL
 ): Promise<T> {
+  const provider: AiProvider = 'GROQ';
   const wait = hooks.wait || ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   const random = hooks.random || Math.random;
 
@@ -286,9 +262,6 @@ export async function callProviderWithTransientRetries<T>(
   throw new Error(`${provider} retry loop exited unexpectedly.`);
 }
 
-export const isTransientGeminiError = isTransientProviderError;
-export const callGeminiWithTransientRetries = callProviderWithTransientRetries;
-
 export class AiQuestionService {
   private static activeGenerations = new Set<string>();
 
@@ -317,13 +290,7 @@ export class AiQuestionService {
   }
 
   static isConfigured(): boolean {
-    try {
-      const provider = resolveAiProvider();
-      const key = provider === 'GROQ' ? process.env.GROQ_API_KEY : process.env.GEMINI_API_KEY;
-      return Boolean(key?.trim());
-    } catch {
-      return false;
-    }
+    return Boolean(process.env.GROQ_API_KEY?.trim());
   }
 
   static getStatus(): {
@@ -338,18 +305,13 @@ export class AiQuestionService {
     message: string;
   } {
     const configured = this.isConfigured();
-    let provider: AiProvider = 'GEMINI';
-    try {
-      provider = resolveAiProvider();
-    } catch {
-      // An invalid provider is reported as unconfigured without exposing environment values.
-    }
+    const provider: AiProvider = 'GROQ';
     const isGenerating = this.activeGenerations.size > 0;
     const maxFileSizeMb = Math.round(getMaxSyllabusFileSizeBytes() / (1024 * 1024));
     return {
       configured,
       provider,
-      model: providerModel(provider),
+      model: GROQ_MODEL,
       status: !configured ? 'NOT_CONFIGURED' : (isGenerating ? 'GENERATING' : 'READY'),
       pendingReviewCount: 0,
       maxFileSizeMb,
@@ -357,7 +319,7 @@ export class AiQuestionService {
       supportedQuestionTypes: ['MCQ'],
       message: configured
         ? (isGenerating ? 'Generating syllabus-grounded questions...' : 'AI Question Generation with Syllabus Upload is active.')
-        : `AI Question Generation is not configured. Set ${provider}_API_KEY in the backend environment or choose a configured AI_PROVIDER.`
+        : 'AI Question Generation is not configured. Set GROQ_API_KEY in the backend environment.'
     };
   }
 
@@ -375,6 +337,7 @@ export class AiQuestionService {
     syllabusId?: string;
     syllabusText?: string;
     syllabusFileName?: string;
+    selectedUnits?: string[];
   }, providerClient?: AiProviderClient, retryHooks?: RetryHooks): Promise<{
     drafts: IGeneratedQuestionDraft[];
     provider: AiProvider;
@@ -389,7 +352,7 @@ export class AiQuestionService {
     }
 
     const syllabusText = (params.syllabusText || '').trim();
-    const topicOrUnit = (params.topic || params.unit || '').trim();
+    const topicOrUnit = (params.topic || '').trim();
     const isAllTopics = topicOrUnit.toLocaleLowerCase() === 'all';
     const subject = (params.subject || '').trim();
 
@@ -409,6 +372,36 @@ export class AiQuestionService {
     if (!subjectCompatibility.compatible) {
       throw createSyllabusSubjectMismatchError(subjectCompatibility);
     }
+
+    const availableUnits = extractSyllabusUnits(syllabusText);
+    const requestedUnits = params.selectedUnits ?? (params.unit ? [params.unit] : []);
+    if (!Array.isArray(requestedUnits) || requestedUnits.some((unit) => typeof unit !== 'string' || !unit.trim())) {
+      const err: any = new Error('Selected syllabus units must be valid unit names.');
+      err.statusCode = 400;
+      err.code = 'AI_INVALID_REQUEST';
+      throw err;
+    }
+    const selectedUnitKeys = new Set(requestedUnits.map(normalizeSyllabusUnit));
+    if (selectedUnitKeys.size !== requestedUnits.length) {
+      const err: any = new Error('A syllabus unit can only be selected once.');
+      err.statusCode = 400;
+      err.code = 'AI_INVALID_REQUEST';
+      throw err;
+    }
+    const selectedUnits = requestedUnits.map((requestedUnit) =>
+      availableUnits.find((unit) => normalizeSyllabusUnit(unit.name) === normalizeSyllabusUnit(requestedUnit))
+    );
+    if (requestedUnits.length && (availableUnits.length === 0 || selectedUnits.some((unit) => !unit))) {
+      const err: any = new Error('Select units that are present in the uploaded syllabus.');
+      err.statusCode = 400;
+      err.code = 'AI_INVALID_REQUEST';
+      throw err;
+    }
+    const generationSyllabusText = selectedUnits.length
+      ? selectedUnits.map((unit) => unit!.text).join('\n\n')
+      : syllabusText;
+    const availableUnitKeys = new Set(availableUnits.map((unit) => normalizeSyllabusUnit(unit.name)));
+    const shouldGenerateAll = isAllTopics || (!topicOrUnit && requestedUnits.length === 0);
 
     const resolvedSubject = subject;
     const resolvedTopic = topicOrUnit || resolvedSubject;
@@ -436,12 +429,12 @@ export class AiQuestionService {
       throw err;
     }
 
-    const provider = resolveAiProvider();
-    const modelName = providerModel(provider);
-    const apiKey = (provider === 'GROQ' ? process.env.GROQ_API_KEY : process.env.GEMINI_API_KEY)?.trim();
+    const provider: AiProvider = 'GROQ';
+    const modelName = GROQ_MODEL;
+    const apiKey = process.env.GROQ_API_KEY?.trim();
     if (!apiKey) {
       const err: any = new Error(
-        `AI question generation is not configured. Set ${provider}_API_KEY in the server environment before requesting syllabus-based question generation.`
+        'AI question generation is not configured. Set GROQ_API_KEY in the server environment before requesting syllabus-based question generation.'
       );
       err.statusCode = 503;
       err.code = 'AI_GENERATION_NOT_CONFIGURED';
@@ -458,26 +451,14 @@ export class AiQuestionService {
     }
 
     try {
-      const geminiClient = provider === 'GEMINI'
-        ? (providerClient as GeminiContentClient | undefined) || new GoogleGenAI({
-            apiKey,
-            httpOptions: {
-              headers: {
-                'User-Agent': 'aistudio-build'
-              }
-            }
-          })
-        : undefined;
-      const groqClient = provider === 'GROQ'
-        ? (providerClient as GroqContentClient | undefined) || new Groq({ apiKey, timeout: 30000, maxRetries: 0 })
-        : undefined;
+      const groqClient = providerClient || new Groq({ apiKey, timeout: 30000, maxRetries: 0 });
 
       const difficultyInstruction =
         difficulty === 'MIXED'
           ? 'Use a balanced mix of EASY, MEDIUM, and HARD difficulty levels.'
           : `All questions must be at "${difficulty}" difficulty.`;
 
-      const syllabusContext = `\n\nSYLLABUS CONTENT (the sole source for this request):\n"""\n${syllabusText}\n"""`;
+      const syllabusContext = `\n\nSYLLABUS CONTENT (the sole source for this request):\n"""\n${generationSyllabusText}\n"""`;
 
       const systemInstruction = `You are a distinguished university professor and academic examination board expert.
 Your job is to generate rigorous, authentic university-level multiple-choice questions (MCQs).
@@ -491,61 +472,18 @@ Rules:
 7. Do not introduce outside concepts or use general knowledge to fill missing information.
 8. If the syllabus does not contain enough information, return no questions; do not invent content.`;
 
-      const scopeInstruction = isAllTopics
+      const unitScopeInstruction = selectedUnits.length
+        ? `Generate questions only from these selected syllabus units: ${selectedUnits.map((unit) => unit!.name).join(', ')}. Do not use content from any other unit.`
+        : '';
+      const scopeInstruction = shouldGenerateAll
         ? 'Generate across all relevant units and topics present in the supplied syllabus. Do not interpret "all" as a literal syllabus topic. For the topic metadata field only, use the exact value "all"; syllabusTopic must name an actual topic present in the content.'
         : topicOrUnit
           ? `Focus on topic/unit "${topicOrUnit}".`
           : '';
-      const prompt = `Generate ${count} rigorous university-level multiple-choice questions (MCQs) for the subject "${resolvedSubject}". ${scopeInstruction} Use exact metadata values subject="${resolvedSubject}", course="${safeCourse}", semester="${safeSemester}", and topic="${resolvedTopic}". ${difficultyInstruction} Each question must have exactly 4 distinct options with IDs "A", "B", "C", and "D", a single valid correctOption ("A", "B", "C", or "D"), difficulty ("EASY", "MEDIUM", or "HARD"), a syllabus unit and syllabus topic supported by the supplied content, a sourceReference copied exactly from the syllabus, marks (${marks}), and a concise academic explanation. If the syllabus is insufficient, return an empty array. Do not invent any value to fill a required field.${syllabusContext}`;
+      const prompt = `Generate ${count} rigorous university-level multiple-choice questions (MCQs) for the subject "${resolvedSubject}". ${scopeInstruction} ${unitScopeInstruction} Use exact metadata values subject="${resolvedSubject}", course="${safeCourse}", semester="${safeSemester}", and topic="${resolvedTopic}". ${difficultyInstruction} Each question must have exactly 4 distinct options with IDs "A", "B", "C", and "D", a single valid correctOption ("A", "B", "C", or "D"), difficulty ("EASY", "MEDIUM", or "HARD"), a syllabus unit and syllabus topic supported by the supplied content, a sourceReference copied exactly from the syllabus, marks (${marks}), and a concise academic explanation. If the syllabus is insufficient, return an empty array. Do not invent any value to fill a required field.${syllabusContext}`;
 
       const response = await callProviderWithTransientRetries<GenerationProviderResponse>(() => {
-        if (provider === 'GEMINI') {
-          return geminiClient!.models.generateContent({
-            model: modelName,
-            contents: prompt,
-            config: {
-              systemInstruction,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    questionText: { type: Type.STRING },
-                    subject: { type: Type.STRING },
-                    course: { type: Type.STRING },
-                    semester: { type: Type.STRING },
-                    topic: { type: Type.STRING },
-                    syllabusUnit: { type: Type.STRING },
-                    syllabusTopic: { type: Type.STRING },
-                    sourceReference: { type: Type.STRING },
-                    difficulty: { type: Type.STRING },
-                    options: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          id: { type: Type.STRING },
-                          text: { type: Type.STRING }
-                        },
-                        required: ['id', 'text']
-                      }
-                    },
-                    correctOption: { type: Type.STRING },
-                    marks: { type: Type.NUMBER },
-                    explanation: { type: Type.STRING }
-                  },
-                  required: [
-                    'questionText', 'subject', 'course', 'semester', 'topic', 'syllabusUnit',
-                    'syllabusTopic', 'sourceReference', 'difficulty', 'options', 'correctOption',
-                    'marks', 'explanation'
-                  ]
-                }
-              }
-            }
-          });
-        }
-        return groqClient!.chat.completions.create({
+        return groqClient.chat.completions.create({
           model: modelName,
           messages: [
             { role: 'system', content: systemInstruction },
@@ -562,11 +500,9 @@ Rules:
           temperature: 0,
           max_completion_tokens: Math.min(49152, Math.max(8192, count * 256))
         });
-      }, retryHooks, modelName, provider);
+      }, retryHooks, modelName);
 
-      const rawText = provider === 'GEMINI'
-        ? response.text?.trim()
-        : response.choices?.[0]?.message?.content?.trim();
+      const rawText = response.choices?.[0]?.message?.content?.trim();
       if (!rawText) {
         const err: any = new Error(`${provider} returned an empty response.`);
         err.statusCode = 502;
@@ -583,7 +519,7 @@ Rules:
         throw err;
       }
 
-      if (provider === 'GROQ' && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         parsed = (parsed as { questions?: unknown }).questions;
       }
       if (!Array.isArray(parsed)) {
@@ -629,10 +565,11 @@ Rules:
         const optionValues = Array.isArray(item.options) ? item.options : [];
         const correctOption = String(item.correctOption || '').toUpperCase().trim();
         const explanation = typeof item.explanation === 'string' ? item.explanation.trim() : '';
-        const sourceText = syllabusText.toLowerCase().replace(/\s+/g, ' ');
+        const sourceText = generationSyllabusText.toLowerCase().replace(/\s+/g, ' ');
         const normalizedReference = sourceReference.toLowerCase().replace(/\s+/g, ' ');
         const normalizedQuestion = qText.toLowerCase().replace(/\s+/g, ' ');
         const normalizedUnit = syllabusUnit.toLowerCase().replace(/\s+/g, ' ');
+        const normalizedUnitKey = normalizeSyllabusUnit(syllabusUnit);
         const normalizedTopic = syllabusTopic.toLowerCase().replace(/\s+/g, ' ');
 
         if (
@@ -689,8 +626,10 @@ Rules:
         if (
           Number(item.marks) !== marks ||
           !sourceText.includes(normalizedReference) ||
-          !sourceText.includes(normalizedUnit) ||
-          (!isAllTopics && !sourceText.includes(normalizedTopic))
+          (!selectedUnits.length && availableUnitKeys.size === 0 && !sourceText.includes(normalizedUnit)) ||
+          (selectedUnits.length > 0 && !selectedUnitKeys.has(normalizedUnitKey)) ||
+          (availableUnitKeys.size > 0 && !availableUnitKeys.has(normalizedUnitKey)) ||
+          (!shouldGenerateAll && topicOrUnit && !sourceText.includes(normalizedTopic))
         ) {
           const err: any = new Error(`${provider} question ${idx + 1} has invalid marks or an unsupported source reference.`);
           err.statusCode = 502;
@@ -746,7 +685,6 @@ Rules:
         error.code === 'INSUFFICIENT_SYLLABUS_CONTEXT' ||
         error.code === 'AI_INVALID_REQUEST' ||
         error.code === 'AI_GENERATION_NOT_CONFIGURED' ||
-        error.code === 'AI_PROVIDER_INVALID_CONFIG' ||
         error.statusCode === 400 ||
         error.statusCode === 401 ||
         error.statusCode === 403 ||
@@ -757,19 +695,13 @@ Rules:
       }
       const providerStatus = Number(error.status ?? error.statusCode);
       const retryable = isTransientProviderError(error);
-      const statusCode = provider === 'GEMINI' && retryable
-        ? 503
-        : Number.isInteger(providerStatus) && providerStatus >= 400 && providerStatus <= 599
-          ? providerStatus
-          : retryable
-            ? 503
-            : 502;
+      const statusCode = Number.isInteger(providerStatus) && providerStatus >= 400 && providerStatus <= 599
+        ? providerStatus
+        : retryable
+          ? 503
+          : 502;
       logger.error(`${provider} provider request failed (${error.name || 'Error'}, status ${statusCode}).`);
-      const wrapped: any = new Error(
-        provider === 'GEMINI' && statusCode === 503
-          ? 'Gemini is temporarily unavailable due to high demand. Please try again in a moment.'
-          : `${provider} provider request failed with HTTP ${statusCode}.`
-      );
+      const wrapped: any = new Error(`${provider} provider request failed with HTTP ${statusCode}.`);
       wrapped.statusCode = statusCode;
       wrapped.code = retryable
         ? 'AI_GENERATION_TEMPORARILY_UNAVAILABLE'
@@ -836,13 +768,20 @@ Rules:
       syllabusText: syllabus.extractedText,
       syllabusFileName: syllabus.fileName
     }, providerClient, retryHooks);
+    const availableUnits = extractSyllabusUnits(syllabus.extractedText);
+    const requestedUnits = params.selectedUnits ?? (params.unit ? [params.unit] : []);
     const batch = await AiGenerationBatchService.create({
       generatedBy: user.userId,
       generatedByName: user.name,
       subject,
       course: syllabus.course,
       semester: syllabus.semester,
-      topic: params.topic?.trim() || params.unit?.trim() || subject,
+      topic: params.topic?.trim() || subject,
+      selectedUnits: (requestedUnits.length ? requestedUnits : availableUnits.map((unit) => unit.name)).map((unit) =>
+        availableUnits.find((availableUnit) =>
+          normalizeSyllabusUnit(availableUnit.name) === normalizeSyllabusUnit(unit)
+        )?.name || unit
+      ),
       difficulty: String(params.difficulty || 'MEDIUM').toUpperCase() as 'EASY' | 'MEDIUM' | 'HARD' | 'MIXED',
       marksPerQuestion: Number(params.marks),
       requestedCount: Number(params.count),
@@ -850,7 +789,7 @@ Rules:
       syllabusId: syllabus.syllabusId,
       sourceFileName: syllabus.fileName,
       provider,
-      aiModel: providerModel(provider)
+      aiModel: GROQ_MODEL
     });
     const savedDrafts = await QuestionService.createAiDrafts(drafts, user, batch.generationId);
     await AuditService.record({
@@ -863,10 +802,11 @@ Rules:
       details: JSON.stringify({
         generationId: batch.generationId,
         provider,
-        model: providerModel(provider),
+        model: GROQ_MODEL,
         teacherUserId: user.userId,
         syllabusId: syllabus.syllabusId,
         generatedCount: savedDrafts.length,
+        selectedUnits: batch.selectedUnits || [],
         timestamp: new Date().toISOString(),
         approvalStatus: 'PENDING_TEACHER_REVIEW'
       })

@@ -70,7 +70,7 @@ PASS — Teachers and Admins can publish individual results (`PATCH /api/results
 PASS — Students can only access their own results after `isPublished === true`. Requests by a student for an unpublished result or another student's result return `403 Forbidden`.
 
 ## AI Question Generation Architecture
-PASS — Implemented in `backend/src/services/ai.service.ts` and `/api/ai/questions/generate` + `/api/ai/status` using `@google/genai` (`gemini-3.8-flash`) on the backend. No API keys are exposed in frontend code. Generated questions enter a Teacher Review Queue before being saved to the Question Bank. When `GEMINI_API_KEY` is not configured in the environment, the service reports `PENDING` status without generating fake questions.
+PASS — Implemented in `backend/src/services/ai.service.ts` and `/api/ai/questions/generate` + `/api/ai/status` using the backend-only Groq provider. No API keys are exposed in frontend code. Generated questions enter a Teacher Review Queue before being saved to the Question Bank. When `GROQ_API_KEY` is not configured in the environment, the service reports `NOT_CONFIGURED` without generating fake questions.
 
 ## Proctoring Persistence
 PASS — Implemented in `backend/src/models/ProctoringEvent.ts` and `/api/proctoring/events`, persisting real browser events (`TAB_SWITCH`, `WINDOW_BLUR`, `FULLSCREEN_EXIT`, `CAMERA_PERMISSION_DENIED`, `CAMERA_STREAM_LOST`) and updating attempt violation counters.
@@ -100,7 +100,7 @@ PASS — `tsc --noEmit --project backend/tsconfig.json` completed with zero erro
 PASS — All 3 backend test suites (`auth-rbac.test.ts`, `phase1-2-exam-core.test.ts`, and `phase1-3-full-lifecycle.test.ts`) passed 100%.
 
 ## Security Audit
-PASS — No `GEMINI_API_KEY` or secrets in frontend code or `VITE_*` env vars; `passwordHash` and `correctOption` never leaked to students; client-supplied scores ignored; `localStorage` used only for session token.
+PASS — No provider keys or secrets in frontend code or `VITE_*` env vars; `passwordHash` and `correctOption` never leaked to students; client-supplied scores ignored; `localStorage` used only for session token.
 
 ## Mock Data Audit
 PASS — Repository-wide audit confirmed zero production mock datasets or fake timers in frontend or backend application code.

@@ -44,7 +44,7 @@ export interface IQuestionInput {
   syllabusTopic?: string;
   sourceReference?: string;
   generationId?: string;
-  aiProvider?: 'GEMINI' | 'GROQ';
+  aiProvider?: 'GROQ';
   aiModel?: string;
   approvedBy?: string;
   approvedAt?: Date;

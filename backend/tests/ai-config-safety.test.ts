@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
-import { AiQuestionService } from '../src/services/ai.service';
+import { AiQuestionService, GroqContentClient } from '../src/services/ai.service';
 
 async function run(): Promise<void> {
-  const originalKey = process.env.GEMINI_API_KEY;
-  const originalProvider = process.env.AI_PROVIDER;
-  process.env.AI_PROVIDER = 'GEMINI';
-  delete process.env.GEMINI_API_KEY;
+  const originalKey = process.env.GROQ_API_KEY;
+  delete process.env.GROQ_API_KEY;
 
   try {
     const status = AiQuestionService.getStatus();
-    assert.equal(status.configured, false, 'AI service should report not configured when GEMINI_API_KEY is absent');
+    assert.equal(status.provider, 'GROQ');
+    assert.equal(status.model, 'openai/gpt-oss-120b');
+    assert.equal(status.configured, false, 'AI service should report not configured when GROQ_API_KEY is absent');
     assert.equal(status.status, 'NOT_CONFIGURED', 'AI service should report NOT_CONFIGURED when the backend key is absent');
 
     await assert.rejects(
@@ -43,7 +43,7 @@ async function run(): Promise<void> {
       'AI generation should reject when the API key is absent instead of synthesizing fake questions'
     );
 
-    process.env.GEMINI_API_KEY = 'test-only-provider-placeholder';
+    process.env.GROQ_API_KEY = 'test-only-provider-placeholder';
     const providerParams = {
       syllabusId: 'SYL-provider-regression',
       subject: 'Operating Systems',
@@ -56,43 +56,44 @@ async function run(): Promise<void> {
       syllabusText: 'UNIT III: Process scheduling uses priorities and time slices. Preemptive scheduling interrupts a running process. Non-preemptive scheduling lets a process continue until completion or blocking.'
     };
     let capturedRequest: any;
-    await assert.rejects(
-      () => AiQuestionService.generateQuestionsForReview(providerParams, {
-        models: {
-          generateContent: async (request) => {
+    const malformedClient: GroqContentClient = {
+      chat: {
+        completions: {
+          create: async (request) => {
             capturedRequest = request;
-            return { text: '{malformed structured response' };
+            return { choices: [{ message: { content: '{malformed structured response' } }] };
           }
         }
-      }),
-      (error: any) => error.code === 'AI_INVALID_RESPONSE',
-      'Malformed Gemini structured output must be rejected'
-    );
-    assert(String(capturedRequest.contents).includes(providerParams.syllabusText));
-    assert(capturedRequest.config.responseSchema.items.properties.sourceReference);
-
+      }
+    };
     await assert.rejects(
-      () => AiQuestionService.generateQuestionsForReview(providerParams, {
-        models: {
-          generateContent: async () => { throw new Error('test provider unavailable'); }
+      () => AiQuestionService.generateQuestionsForReview(providerParams, malformedClient),
+      (error: any) => error.code === 'AI_INVALID_RESPONSE',
+      'Malformed Groq structured output must be rejected'
+    );
+    assert(String(capturedRequest.messages[1].content).includes(providerParams.syllabusText));
+    assert(capturedRequest.response_format.json_schema.schema.properties.questions.items.properties.sourceReference);
+
+    const unavailableClient: GroqContentClient = {
+      chat: {
+        completions: {
+          create: async () => { throw new Error('test provider unavailable'); }
         }
+      }
+    };
+    await assert.rejects(
+      () => AiQuestionService.generateQuestionsForReview(providerParams, unavailableClient, {
+        wait: async () => undefined,
+        random: () => 0
       }),
-      (error: any) => error.code === 'AI_GENERATION_TEMPORARILY_UNAVAILABLE' || error.code === 'AI_PROVIDER_UNAVAILABLE',
+      (error: any) => error.code === 'AI_GENERATION_TEMPORARILY_UNAVAILABLE' || error.code === 'AI_PROVIDER_REQUEST_FAILED',
       'Provider failures must be reported as AI_GENERATION_TEMPORARILY_UNAVAILABLE'
     );
 
-    console.log('✅ AI config safety regression test passed');
+    console.log('Groq-only AI configuration safety test passed');
   } finally {
-    if (originalProvider === undefined) {
-      delete process.env.AI_PROVIDER;
-    } else {
-      process.env.AI_PROVIDER = originalProvider;
-    }
-    if (originalKey === undefined) {
-      delete process.env.GEMINI_API_KEY;
-    } else {
-      process.env.GEMINI_API_KEY = originalKey;
-    }
+    if (originalKey === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = originalKey;
   }
 }
 

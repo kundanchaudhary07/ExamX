@@ -23,9 +23,14 @@ import {
   SEMESTERS,
   SECTIONS
 } from '../../constants';
-import { dbService } from '../../services/dbService';
+import {
+  dbService,
+  mapBackendQuestionToFrontend,
+  mapBackendUserToSystemUser
+} from '../../services/dbService';
 import { realtimeService } from '../../services/realtimeService';
 import { AiGenerationBatchCards } from './AiGenerationBatchCards';
+import { TopicMasteryChart } from '../Charts';
 import {
   Modal,
   FormSection,
@@ -99,7 +104,11 @@ interface AdminDashboardProps {
   onSaveExam: (exam: ScheduledExam) => Promise<void> | void;
   onDeleteExam?: (examId: string) => Promise<void> | void;
   onPublishResult: (resultId: string) => Promise<void> | void;
-  onPublishAllForExam?: (examId: string) => Promise<void> | void;
+  onStatusChange?: (
+    examId: string,
+    status: Parameters<typeof dbService.updateExamStatus>[1],
+    publishResults?: boolean
+  ) => Promise<void> | void;
   onResolveQuery: (queryId: string, response: string, status?: 'RESOLVED' | 'REJECTED') => Promise<void> | void;
   onRefreshGlobalData?: () => Promise<void> | void;
 }
@@ -114,7 +123,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onSaveExam,
   onDeleteExam,
   onPublishResult,
-  onPublishAllForExam,
+  onStatusChange,
   onResolveQuery,
   onRefreshGlobalData
 }) => {
@@ -131,6 +140,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [isLoadingData, setIsLoadingData] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [queryStatusFilter, setQueryStatusFilter] = useState<'ALL' | 'PENDING' | 'RESOLVED'>('ALL');
+  const [resultStatusFilter, setResultStatusFilter] = useState<'ALL' | 'PUBLISHED' | 'PENDING'>('ALL');
 
   // Teacher Creation State
   const [showCreateTeacherModal, setShowCreateTeacherModal] = useState(false);
@@ -217,8 +228,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Feedback banner
   const [feedbackBanner, setFeedbackBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  const loadDirectoryAndLogs = useCallback(async () => {
-    setIsLoadingData(true);
+  const loadDirectoryAndLogs = useCallback(async (showLoading = true) => {
+    if (showLoading) setIsLoadingData(true);
     setLoadError(null);
     try {
       const [teacherList, studentList, questionList, proctorList, logs, health, attemptList, generationBatches] = await Promise.all([
@@ -247,7 +258,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     } catch (err: any) {
       setLoadError(err.message || 'Unable to load dashboard data.');
     } finally {
-      setIsLoadingData(false);
+      if (showLoading) setIsLoadingData(false);
     }
   }, []);
 
@@ -257,21 +268,77 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   useEffect(() => {
     const unsub = realtimeService.subscribe(payload => {
-      if (
-        payload.event.startsWith('teacher.') ||
-        payload.event.startsWith('student.') ||
-        payload.event.startsWith('question.') ||
-        payload.event.startsWith('proctoring.') ||
-        payload.event === 'audit.created' ||
-        payload.event.startsWith('exam.') ||
-        payload.event.startsWith('result.') ||
-        payload.event.startsWith('query.')
-      ) {
-        loadDirectoryAndLogs();
+      const data = payload.data as Record<string, any> | undefined;
+      if (payload.event === 'teacher.updated' && data?.teacher) {
+        const teacher = mapBackendUserToSystemUser(data.teacher);
+        setTeachers(previous => previous.map(item =>
+          (item.userId || item.id) === (teacher.userId || teacher.id) ? teacher : item
+        ));
+        setSelectedTeacherDetails(previous =>
+          previous && (previous.teacher.userId || previous.teacher.id) === (teacher.userId || teacher.id)
+            ? { ...previous, teacher }
+            : previous
+        );
+        return;
+      }
+      if (payload.event === 'student.updated' && data?.student) {
+        const student = mapBackendUserToSystemUser(data.student);
+        setStudents(previous => previous.map(item =>
+          (item.userId || item.id) === (student.userId || student.id) ? student : item
+        ));
+        setSelectedStudentDetails(previous =>
+          previous && (previous.student.userId || previous.student.id) === (student.userId || student.id)
+            ? { ...previous, student }
+            : previous
+        );
+        return;
+      }
+      if (payload.event === 'monitoring.updated' && data?.attempt) {
+        const attempt = data.attempt as ExamAttemptRecord;
+        setAttempts(previous => [
+          attempt,
+          ...previous.filter(item => item.attemptId !== attempt.attemptId)
+        ]);
+        return;
+      }
+      if (payload.event === 'proctoring.event' && data?.event) {
+        const event = data.event as ProctoringEventRecord;
+        setProctoringEvents(previous => [
+          event,
+          ...previous.filter(item => item.eventId !== event.eventId)
+        ]);
+        return;
+      }
+      if (payload.event === 'audit.created' && data?.log) {
+        const log = data.log as AuditLog;
+        setAuditLogs(previous => [
+          log,
+          ...previous.filter(item => item.auditId !== log.auditId)
+        ].slice(0, 100));
+        return;
+      }
+      if (payload.event.startsWith('question.')) {
+        const questionData = data?.question;
+        if (payload.event === 'question.deleted' && data?.questionId) {
+          setQuestions(previous => previous.filter(question =>
+            question.questionId !== data.questionId && question.id !== data.questionId
+          ));
+        } else if (questionData) {
+          const question = mapBackendQuestionToFrontend(questionData);
+          setQuestions(previous => {
+            const index = previous.findIndex(item =>
+              (item.questionId || item.id) === (question.questionId || question.id)
+            );
+            if (index < 0) return [question, ...previous];
+            const next = [...previous];
+            next[index] = question;
+            return next;
+          });
+        }
       }
     });
     return () => unsub();
-  }, [loadDirectoryAndLogs]);
+  }, []);
 
   const openCreateTeacherDialog = () => {
     setTeacherFormError(null);
@@ -321,13 +388,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const studentId = selectedStudentDetails.student.userId || selectedStudentDetails.student.id;
     try {
       const nextManagedBy = assigningTeacherId ? [assigningTeacherId] : [];
-      await dbService.updateStudent(studentId, { managedBy: nextManagedBy });
-      const refreshed = await dbService.getStudentDetails(studentId);
-      setSelectedStudentDetails(refreshed);
-      await loadDirectoryAndLogs();
+      const updatedStudent = await dbService.updateStudent(studentId, { managedBy: nextManagedBy });
+      setStudents(previous => previous.map(item =>
+        (item.userId || item.id) === (updatedStudent.userId || updatedStudent.id)
+          ? updatedStudent
+          : item
+      ));
+      setSelectedStudentDetails(previous =>
+        previous
+          ? {
+              ...previous,
+              student: updatedStudent,
+              assignedTeacher: teachers.find(teacher =>
+                (teacher.userId || teacher.id) === assigningTeacherId
+              ) || null
+            }
+          : previous
+      );
       setFeedbackBanner({
         type: 'success',
-        message: `Updated teacher assignment for ${refreshed.student.name}.`
+        message: `Updated teacher assignment for ${updatedStudent.name}.`
       });
     } catch (err: any) {
       setFeedbackBanner({
@@ -361,13 +441,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       action: async () => {
         const nextStatus = isBlocking ? 'BLOCKED' : 'ACTIVE';
         try {
-          await dbService.updateUserStatus(target.userId || target.id, nextStatus);
-          await loadDirectoryAndLogs();
-          if (selectedTeacherDetails?.teacher.userId === target.userId) {
-            handleOpenTeacherDetails(target.userId);
-          }
-          if (selectedStudentDetails?.student.userId === target.userId) {
-            handleOpenStudentDetails(target.userId);
+          const updatedUser = await dbService.updateUserStatus(target.userId || target.id, nextStatus);
+          if (updatedUser.role === 'TEACHER') {
+            setTeachers(previous => previous.map(item =>
+              (item.userId || item.id) === (updatedUser.userId || updatedUser.id) ? updatedUser : item
+            ));
+            setSelectedTeacherDetails(previous =>
+              previous && (previous.teacher.userId || previous.teacher.id) === (updatedUser.userId || updatedUser.id)
+                ? { ...previous, teacher: updatedUser }
+                : previous
+            );
+          } else if (updatedUser.role === 'STUDENT') {
+            setStudents(previous => previous.map(item =>
+              (item.userId || item.id) === (updatedUser.userId || updatedUser.id) ? updatedUser : item
+            ));
+            setSelectedStudentDetails(previous =>
+              previous && (previous.student.userId || previous.student.id) === (updatedUser.userId || updatedUser.id)
+                ? { ...previous, student: updatedUser }
+                : previous
+            );
           }
           setFeedbackBanner({
             type: 'success',
@@ -395,12 +487,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       consequence: "The student's active examination attempt will be terminated immediately due to proctoring policy violation. Recorded responses will be finalized.",
       action: async () => {
         try {
-          await dbService.submitExamAttempt(attemptId, {
+          const submitted = await dbService.submitExamAttempt(attemptId, {
             terminatedByProctor: true,
             terminationReason: 'Administrative / Proctoring violation'
           });
+          setAttempts(previous => [
+            submitted.attempt,
+            ...previous.filter(item => item.attemptId !== submitted.attempt.attemptId)
+          ]);
           setSelectedProctoringDetail(null);
-          await loadDirectoryAndLogs();
           setFeedbackBanner({
             type: 'success',
             message: `Attempt ${attemptId} has been terminated.`
@@ -447,7 +542,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         userId: res.credentials.userId,
         temporaryPassword: res.credentials.password
       });
-      await loadDirectoryAndLogs();
+      if (res.teacher) {
+        setTeachers(previous => [res.teacher, ...previous.filter(item =>
+          (item.userId || item.id) !== (res.teacher.userId || res.teacher.id)
+        )]);
+      }
     } catch (err: any) {
       setTeacherFormError(err.message || 'Failed to create teacher account');
     } finally {
@@ -493,7 +592,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         userId: res.credentials.userId,
         temporaryPassword: res.credentials.password
       });
-      await loadDirectoryAndLogs();
+      if (res.student) {
+        setStudents(previous => [res.student, ...previous.filter(item =>
+          (item.userId || item.id) !== (res.student.userId || res.student.id)
+        )]);
+      }
     } catch (err: any) {
       setStudentFormError(err.message || 'Failed to create student account');
     } finally {
@@ -573,7 +676,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             creds = await dbService.resetStudentPassword(targetId, trimmedPass);
           }
           setResetMessage(`Password updated for ${resetTarget.user.name} (${targetId}): ${creds.temporaryPassword}`);
-          await loadDirectoryAndLogs();
         } catch (err: any) {
           setResetMessage(err.message || 'Password reset failed');
         }
@@ -591,7 +693,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       action: async () => {
         try {
           await dbService.deleteQuestion(questionId);
-          await loadDirectoryAndLogs();
+          setQuestions(previous => previous.filter(question =>
+            question.questionId !== questionId && question.id !== questionId
+          ));
           setFeedbackBanner({ type: 'success', message: `Question ${questionId} removed.` });
         } catch (err: any) {
           setFeedbackBanner({ type: 'error', message: err.message || 'Unable to delete question.' });
@@ -691,11 +795,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const examsWithQueriesCount = Array.from(
     new Set(queries.map(q => q.examId).filter(Boolean))
   ).length;
+  const visibleQueries = queries.filter(query => {
+    const pending = ['OPEN', 'PENDING', 'UNDER_REVIEW'].includes(query.status);
+    const resolved = ['RESOLVED', 'APPROVED', 'REJECTED', 'RESOLVED_ACCEPTED', 'RESOLVED_REJECTED'].includes(query.status);
+    return queryStatusFilter === 'ALL' || (queryStatusFilter === 'PENDING' ? pending : resolved);
+  });
 
   const publishedResultsCount = results.filter(
     r => r.status === 'PUBLISHED' || r.isPublished
   ).length;
   const unpublishedResultsCount = results.length - publishedResultsCount;
+  const visibleResults = results.filter(result =>
+    resultStatusFilter === 'ALL' ||
+    (resultStatusFilter === 'PUBLISHED'
+      ? result.isPublished || result.status === 'PUBLISHED'
+      : !(result.isPublished || result.status === 'PUBLISHED'))
+  );
+  const publishedResultsBySubject = (() => {
+    const groups: Record<string, { subject: string; total: number; submissions: number }> = {};
+    results.forEach(result => {
+      if (!result.isPublished && result.status !== 'PUBLISHED') return;
+      const subject = result.subject?.trim() || result.examTitle || 'Unspecified subject';
+      const group = groups[subject] || { subject, total: 0, submissions: 0 };
+      group.total += result.percentage ?? result.accuracy ?? 0;
+      group.submissions += 1;
+      groups[subject] = group;
+    });
+    return Object.values(groups).map(group => ({
+      subject: group.subject,
+      averagePercentage: Math.round(group.total / group.submissions),
+      submissions: group.submissions
+    }));
+  })();
   const passedResultsCount = results.filter(
     r => r.passed === true || (r.percentage ?? r.accuracy ?? 0) >= 40
   ).length;
@@ -724,10 +855,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {activeTab === 'exams' && 'Exams'}
             {activeTab === 'questions' && 'Question Bank'}
             {activeTab === 'results' && 'Results'}
+            {activeTab === 'analytics' && 'Analytics'}
             {activeTab === 'proctoring' && 'Proctoring'}
             {activeTab === 'queries' && 'Queries'}
             {activeTab === 'audit' && 'Audit Logs'}
-            {activeTab === 'settings' && 'Settings'}
+            {activeTab === 'settings' && 'Administrator Profile'}
           </h1>
           <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-1 tabular-nums">
             {user.name} · {user.role} · {user.userId || user.id}
@@ -824,8 +956,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
 
             <KpiCard
-              label="Active Exams"
-              value={activeExamsCount}
+              label="Total Exams"
+              value={exams.length}
               subValue={`${liveExamsCount} Live · ${scheduledExamsCount} Scheduled · ${completedExamsCount} Completed`}
               icon={<FileText className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
               isLoading={isLoadingData}
@@ -847,7 +979,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               subValue={`${resolvedQueriesCount} Resolved inquiries`}
               icon={<MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
               isLoading={isLoadingData}
-              onClick={() => onNavigateTab('queries')}
+              onClick={() => {
+                setQueryStatusFilter('PENDING');
+                onNavigateTab('queries');
+              }}
             />
 
             <KpiCard
@@ -856,7 +991,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               subValue={`${unpublishedResultsCount} Pending publication`}
               icon={<CheckCircle className="w-5 h-5 text-teal-600 dark:text-teal-400" />}
               isLoading={isLoadingData}
-              onClick={() => onNavigateTab('results')}
+              onClick={() => {
+                setResultStatusFilter('PUBLISHED');
+                onNavigateTab('results');
+              }}
             />
 
             <KpiCard
@@ -1306,8 +1444,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           students={students}
           onSaveExam={onSaveExam}
           onDeleteExam={onDeleteExam}
-          onRefresh={onRefreshGlobalData}
-          onPublishExamResults={onPublishAllForExam}
+          onStatusChange={onStatusChange}
         />
       )}
 
@@ -1478,9 +1615,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-              <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Results ({results.length})
-              </h2>
+              <div className="flex w-full flex-wrap items-center justify-between gap-3">
+                <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
+                  Results ({visibleResults.length})
+                </h2>
+                <select
+                  aria-label="Filter results by publication status"
+                  value={resultStatusFilter}
+                  onChange={event => setResultStatusFilter(event.target.value as typeof resultStatusFilter)}
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  <option value="ALL">All results</option>
+                  <option value="PUBLISHED">Published</option>
+                  <option value="PENDING">Pending publication</option>
+                </select>
+              </div>
             {unpublishedResultsCount > 0 && (
               <span className="text-[13.5px] font-medium text-amber-600 dark:text-amber-400">
                 {unpublishedResultsCount} pending publication
@@ -1488,9 +1637,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             )}
           </div>
 
-          {results.length === 0 ? (
+          {visibleResults.length === 0 ? (
             <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No results available.
+              {results.length ? 'No results match this filter.' : 'No results available.'}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1508,7 +1657,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {results.map(r => {
+                  {visibleResults.map(r => {
                     const isPublished = r.status === 'PUBLISHED';
                     const rId = r.resultId || r.id;
                     return (
@@ -1587,6 +1736,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           )}
         </div>
         </div>
+      )}
+
+      {activeTab === 'analytics' && (
+        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
+          <h2 className="mb-2 text-[20px] font-semibold text-slate-900 dark:text-white">
+            Published performance by subject
+          </h2>
+          {publishedResultsBySubject.length === 0 ? (
+            <div className="py-12 text-center text-[14px] text-slate-500 dark:text-slate-400">
+              Publish examination results to view institution-wide performance patterns.
+            </div>
+          ) : (
+            <TopicMasteryChart data={publishedResultsBySubject} />
+          )}
+        </section>
       )}
 
       {/* 7. PROCTORING TAB */}
@@ -1722,14 +1886,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <div className="p-6 border-b border-slate-200 dark:border-slate-700">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-6 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
-                Queries ({queries.length})
+                Queries ({visibleQueries.length})
               </h2>
+              <select
+                aria-label="Filter queries by status"
+                value={queryStatusFilter}
+                onChange={event => setQueryStatusFilter(event.target.value as typeof queryStatusFilter)}
+                className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <option value="ALL">All statuses</option>
+                <option value="PENDING">Pending / in review</option>
+                <option value="RESOLVED">Resolved</option>
+              </select>
             </div>
-          {queries.length === 0 ? (
+          {visibleQueries.length === 0 ? (
             <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
-              No queries yet.
+              {queries.length ? 'No queries match this filter.' : 'No queries yet.'}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1746,7 +1920,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700 text-[14.5px]">
-                  {queries.map(q => {
+                  {visibleQueries.map(q => {
                     const qKey = q.queryId || q.id;
                     const isPending = q.status === 'PENDING' || q.status === 'UNDER_REVIEW';
                     return (
@@ -1930,67 +2104,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* 10. SETTINGS TAB */}
       {activeTab === 'settings' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-4">
-            <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white flex items-center gap-2.5 leading-snug">
-              <SettingsIcon className="w-5 h-5 text-blue-600" />
-              Administrator Profile
-            </h2>
-            <div className="space-y-2.5 text-[15px]">
-              <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-                <span className="text-slate-500">User ID</span>
-                <span className="font-mono font-medium text-slate-900 dark:text-white tabular-nums">
-                  {user.userId || user.id}
-                </span>
+        <div className="space-y-5">
+          <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+            <div className="flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-200 text-lg font-bold text-slate-700 dark:bg-slate-700 dark:text-slate-100">
+                {user.name.split(/\s+/).map(part => part[0]).slice(0, 2).join('').toUpperCase()}
               </div>
-              <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-                <span className="text-slate-500">Name</span>
-                <span className="font-medium text-slate-900 dark:text-white">{user.name}</span>
-              </div>
-              <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-                <span className="text-slate-500">Role</span>
-                <span className="font-medium text-slate-900 dark:text-white">{user.role}</span>
-              </div>
-              <div className="flex justify-between py-2.5">
-                <span className="text-slate-500">Department</span>
-                <span className="font-medium text-slate-900 dark:text-white">
-                  {user.department || 'Controller of Examinations'}
-                </span>
+              <div>
+                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">{user.name}</h2>
+                <p className="mt-1 font-mono text-xs text-slate-500">{user.userId || user.id} · Administrator</p>
+                <div className="mt-2"><StatusBadge status={user.status || 'ACTIVE'} /></div>
               </div>
             </div>
-          </div>
+            <button
+              type="button"
+              onClick={() => void Promise.all([loadDirectoryAndLogs(), onRefreshGlobalData?.()])}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Refresh
+            </button>
+          </section>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-4">
-            <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white flex items-center gap-2.5 leading-snug">
-              <Activity className="w-5 h-5 text-emerald-600" />
-              System Status
-            </h2>
-            <div className="space-y-2.5 text-[15px]">
-              <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-                <span className="text-slate-500">API Status</span>
-                <span className="font-medium text-emerald-600 dark:text-emerald-400">
-                  {healthStatus?.status || 'healthy'}
-                </span>
-              </div>
-              <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-                <span className="text-slate-500">Database</span>
-                <span className="font-medium text-emerald-600 dark:text-emerald-400">
-                  {healthStatus?.database || 'connected'}
-                </span>
-              </div>
-              <div className="flex justify-between py-2.5 border-b border-slate-100 dark:border-slate-700">
-                <span className="text-slate-500">Teacher ID Format</span>
-                <span className="font-mono text-[14px] text-slate-700 dark:text-slate-300 tabular-nums">
-                  1251XXXX
-                </span>
-              </div>
-              <div className="flex justify-between py-2.5">
-                <span className="text-slate-500">Student ID Format</span>
-                <span className="font-mono text-[14px] text-slate-700 dark:text-slate-300 tabular-nums">
-                  1261XXXX
-                </span>
-              </div>
-            </div>
+          <div className="max-w-2xl">
+            <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
+              <h3 className="mb-4 flex items-center gap-2 text-base font-semibold text-slate-900 dark:text-white"><SettingsIcon className="h-4 w-4 text-blue-600" /> Account & administration</h3>
+              <dl className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
+                {[
+                  ['Administrator ID', user.userId || user.id],
+                  ['Full name', user.name],
+                  ['Role', user.role],
+                  ['Email', user.email || '—'],
+                  ['Department', user.department || '—'],
+                  ['Account status', user.status || 'ACTIVE'],
+                  ['Permissions', 'Institution-wide administration']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex justify-between gap-4 py-2.5">
+                    <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
+                    <dd className="text-right font-medium text-slate-800 dark:text-slate-200">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">Passwords, tokens, and other credentials are never displayed here.</p>
+            </section>
           </div>
         </div>
       )}
@@ -2691,13 +2846,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               consequence: 'This student will no longer be under faculty supervision for this teacher.',
                               action: async () => {
                                 const studentId = selectedStudentDetails.student.userId || selectedStudentDetails.student.id;
-                                await dbService.updateStudent(studentId, { managedBy: [] });
-                                const refreshed = await dbService.getStudentDetails(studentId);
-                                setSelectedStudentDetails(refreshed);
-                                await loadDirectoryAndLogs();
+                                const updatedStudent = await dbService.updateStudent(studentId, { managedBy: [] });
+                                setStudents(previous => previous.map(item =>
+                                  (item.userId || item.id) === (updatedStudent.userId || updatedStudent.id)
+                                    ? updatedStudent
+                                    : item
+                                ));
+                                setSelectedStudentDetails(previous =>
+                                  previous
+                                    ? { ...previous, student: updatedStudent, assignedTeacher: null }
+                                    : previous
+                                );
                                 setFeedbackBanner({
                                   type: 'success',
-                                  message: `Removed faculty supervision for ${refreshed.student.name}.`
+                                  message: `Removed faculty supervision for ${updatedStudent.name}.`
                                 });
                               }
                             });
@@ -2749,139 +2911,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 </div>
 
-                {/* KPI Metrics */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Exams Taken</div>
-                    <div className={`${getKpiPrimaryValueClass(selectedStudentDetails.kpis.examsTakenCount)} text-blue-600 dark:text-blue-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.examsTakenCount}
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Average Percentage</div>
-                    <div className={`${getKpiPrimaryValueClass(`${selectedStudentDetails.kpis.averagePercentage}%`)} text-emerald-600 dark:text-emerald-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.averagePercentage}%
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Published Results</div>
-                    <div className={`${getKpiPrimaryValueClass(selectedStudentDetails.kpis.publishedResultsCount)} text-indigo-600 dark:text-indigo-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.publishedResultsCount}
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-                    <div className="text-[13.5px] font-medium text-slate-500">Queries Raised</div>
-                    <div className={`${getKpiPrimaryValueClass(selectedStudentDetails.kpis.queriesCount)} text-amber-600 dark:text-amber-400 mt-1 tabular-nums`}>
-                      {selectedStudentDetails.kpis.queriesCount}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Results Table */}
-                <div>
-                  <h4 className="text-[15px] font-semibold text-slate-900 dark:text-white mb-2.5">
-                    Examination Results ({selectedStudentDetails.results.length})
-                  </h4>
-                  <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-                    <table className="w-full text-left border-collapse text-[14px]">
-                      <thead>
-                        <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 text-[13px] font-semibold">
-                          <th className="py-2.5 px-3.5">Subject</th>
-                          <th className="py-2.5 px-3.5">Score</th>
-                          <th className="py-2.5 px-3.5">Grade</th>
-                          <th className="py-2.5 px-3.5">Status</th>
-                          <th className="py-2.5 px-3.5">Date</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                        {selectedStudentDetails.results.map(r => (
-                          <tr key={r.id}>
-                            <td className="py-2.5 px-3.5 font-medium text-slate-900 dark:text-white">
-                              {r.subjectTitle}
-                            </td>
-                            <td className="py-2.5 px-3.5 font-semibold text-slate-800 dark:text-slate-200 tabular-nums">
-                              {r.score} / {r.totalMarks} ({r.percentage}%)
-                            </td>
-                            <td className="py-2.5 px-3.5 font-semibold text-blue-600 dark:text-blue-400">
-                              {r.grade}
-                            </td>
-                            <td className="py-2.5 px-3.5">
-                              <span
-                                className={`px-2 py-0.5 rounded-md text-[12.5px] font-medium ${
-                                  r.status === 'PUBLISHED'
-                                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-                                    : 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-                                }`}
-                              >
-                                {r.status}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-500 tabular-nums">
-                              {r.evaluatedAt ? new Date(r.evaluatedAt).toLocaleDateString() : '—'}
-                            </td>
-                          </tr>
-                        ))}
-                        {selectedStudentDetails.results.length === 0 && (
-                          <tr>
-                            <td colSpan={5} className="py-5 text-center text-slate-400 text-[14px]">
-                              No examination results recorded for this student yet.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* Exam Summary / Assigned Exams */}
-                <div>
-                  <h4 className="text-[15px] font-semibold text-slate-900 dark:text-white mb-2.5">
-                    Assigned Examinations ({selectedStudentDetails.recentExams?.length || 0})
-                  </h4>
-                  <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-                    <table className="w-full text-left border-collapse text-[14px]">
-                      <thead>
-                        <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 text-[13px] font-semibold">
-                          <th className="py-2.5 px-3.5">Exam Title</th>
-                          <th className="py-2.5 px-3.5">Subject</th>
-                          <th className="py-2.5 px-3.5">Duration</th>
-                          <th className="py-2.5 px-3.5">Total Marks</th>
-                          <th className="py-2.5 px-3.5">Exam Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-                        {(selectedStudentDetails.recentExams || []).map(ex => (
-                          <tr key={ex.id}>
-                            <td className="py-2.5 px-3.5 font-medium text-slate-900 dark:text-white">
-                              {ex.title}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-600 dark:text-slate-300">
-                              {ex.subject}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-500 tabular-nums">
-                              {ex.durationMinutes} mins
-                            </td>
-                            <td className="py-2.5 px-3.5 text-slate-600 dark:text-slate-300 tabular-nums">
-                              {ex.totalMarks}
-                            </td>
-                            <td className="py-2.5 px-3.5">
-                              <span className="px-2 py-0.5 rounded-md text-[12.5px] font-medium bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
-                                {ex.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                        {(!selectedStudentDetails.recentExams || selectedStudentDetails.recentExams.length === 0) && (
-                          <tr>
-                            <td colSpan={5} className="py-5 text-center text-slate-400 text-[14px]">
-                              No assigned examinations found for this student.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
               </div>
             )}
         </Modal>

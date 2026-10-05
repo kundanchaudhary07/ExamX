@@ -264,16 +264,10 @@ export class ExamService {
         throw err;
       }
 
-      if (q.source === 'AI_GENERATED') {
-        const matchesExamContext =
-          String(q.subject || '').trim().toLowerCase() === String(context?.subject || '').trim().toLowerCase() &&
-          this.normalizeCourse(q.course) === this.normalizeCourse(context?.course) &&
-          this.normalizeSemester(q.semester) === this.normalizeSemester(context?.semester);
-        if (!matchesExamContext) {
-          const err: any = new Error(`AI question ${qId} does not match the exam subject, course, and semester.`);
-          err.statusCode = 400;
-          throw err;
-        }
+      if (!this.questionMatchesExamContext(q, context)) {
+        const err: any = new Error(`Question ${qId} does not match the exam subject, course, and semester.`);
+        err.statusCode = 400;
+        throw err;
       }
 
       cleanQuestions.push(qId);
@@ -281,6 +275,23 @@ export class ExamService {
     }
 
     return { cleanQuestions, calculatedMarks };
+  }
+
+  private static questionMatchesExamContext(
+    question: { subject?: string; topic?: string; course?: string; semester?: string },
+    context?: { subject?: string; course?: string; semester?: string }
+  ): boolean {
+    const questionSubject = String(question.subject || question.topic || '').trim().toLocaleLowerCase();
+    const examSubject = String(context?.subject || '').trim().toLocaleLowerCase();
+    if (!questionSubject || !examSubject || questionSubject !== examSubject) return false;
+
+    const questionCourse = this.normalizeCourse(question.course);
+    const examCourse = this.normalizeCourse(context?.course);
+    if (questionCourse && questionCourse !== examCourse) return false;
+
+    const questionSemester = this.normalizeSemester(question.semester);
+    const examSemester = this.normalizeSemester(context?.semester);
+    return !questionSemester || questionSemester === examSemester;
   }
 
   /**
@@ -1020,16 +1031,10 @@ export class ExamService {
         throw err;
       }
 
-      if (question.source === 'AI_GENERATED') {
-        const matchesExamContext =
-          String(question.subject || '').trim().toLowerCase() === String(exam.subject || '').trim().toLowerCase() &&
-          this.normalizeCourse(question.course) === this.normalizeCourse(exam.course) &&
-          this.normalizeSemester(question.semester) === this.normalizeSemester(exam.semester);
-        if (!matchesExamContext) {
-          const err: any = new Error(`AI question ${cleanQId} does not match the exam subject, course, and semester.`);
-          err.statusCode = 400;
-          throw err;
-        }
+      if (!this.questionMatchesExamContext(question, exam)) {
+        const err: any = new Error(`Question ${cleanQId} does not match the exam subject, course, and semester.`);
+        err.statusCode = 400;
+        throw err;
       }
 
       if (exam.questions.includes(cleanQId)) {

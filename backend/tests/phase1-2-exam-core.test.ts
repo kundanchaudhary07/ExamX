@@ -22,7 +22,10 @@ async function runPhase12Tests() {
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
   async function apiRequest(method: string, path: string, body?: any, token?: string) {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-ExamX-Device-Session': '00000000-0000-4000-8000-000000000001'
+    };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const response = await fetch(`${baseUrl}${path}`, {

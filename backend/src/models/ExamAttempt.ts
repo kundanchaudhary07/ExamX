@@ -1,11 +1,12 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export type AttemptStatus = 'IN_PROGRESS' | 'SUBMITTED' | 'EXPIRED' | 'EVALUATED' | 'TERMINATED';
-export type ProctoringStatus = 'CLEAN' | 'WARNED' | 'FLAGGED' | 'TERMINATED';
+export type ProctoringStatus = 'CLEAN' | 'WARNED' | 'FLAGGED' | 'SUSPENDED' | 'TERMINATED';
 
 export interface IAttemptAnswer {
   questionId: string;
   selectedOption: string;
+  markedForReview?: boolean;
   marksAwarded?: number;
   isCorrect?: boolean;
 }
@@ -14,6 +15,7 @@ export interface IExamAttemptDocument extends Document {
   attemptId: string;
   examId: string;
   studentId: string;
+  deviceSessionId: string;
   studentName: string;
   startedAt: Date;
   expiresAt: Date;
@@ -26,6 +28,13 @@ export interface IExamAttemptDocument extends Document {
   attemptNumber: number;
   proctoringStatus: ProctoringStatus;
   warningCount: number;
+  currentQuestionIndex: number;
+  reportedQuestionIds: string[];
+  suspended: boolean;
+  cameraStatus: 'ACTIVE' | 'OFFLINE' | 'UNKNOWN';
+  faceStatus: 'DETECTED' | 'NOT_DETECTED' | 'MULTIPLE' | 'UNKNOWN';
+  fullscreenActive: boolean;
+  lastHeartbeatAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -34,6 +43,7 @@ const AttemptAnswerSchema = new Schema<IAttemptAnswer>(
   {
     questionId: { type: String, required: true, trim: true },
     selectedOption: { type: String, default: '', trim: true },
+    markedForReview: { type: Boolean, default: false },
     marksAwarded: { type: Number, default: 0 },
     isCorrect: { type: Boolean, default: false }
   },
@@ -58,8 +68,12 @@ const ExamAttemptSchema = new Schema<IExamAttemptDocument>(
     studentId: {
       type: String,
       required: true,
-      trim: true,
-      index: true
+      trim: true
+    },
+    deviceSessionId: {
+      type: String,
+      default: '',
+      trim: true
     },
     studentName: {
       type: String,
@@ -108,12 +122,43 @@ const ExamAttemptSchema = new Schema<IExamAttemptDocument>(
     },
     proctoringStatus: {
       type: String,
-      enum: ['CLEAN', 'WARNED', 'FLAGGED', 'TERMINATED'],
+      enum: ['CLEAN', 'WARNED', 'FLAGGED', 'SUSPENDED', 'TERMINATED'],
       default: 'CLEAN'
     },
     warningCount: {
       type: Number,
       default: 0
+    },
+    currentQuestionIndex: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    reportedQuestionIds: {
+      type: [String],
+      default: []
+    },
+    suspended: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    cameraStatus: {
+      type: String,
+      enum: ['ACTIVE', 'OFFLINE', 'UNKNOWN'],
+      default: 'UNKNOWN'
+    },
+    faceStatus: {
+      type: String,
+      enum: ['DETECTED', 'NOT_DETECTED', 'MULTIPLE', 'UNKNOWN'],
+      default: 'UNKNOWN'
+    },
+    fullscreenActive: {
+      type: Boolean,
+      default: false
+    },
+    lastHeartbeatAt: {
+      type: Date
     }
   },
   {
@@ -129,5 +174,9 @@ const ExamAttemptSchema = new Schema<IExamAttemptDocument>(
 );
 
 ExamAttemptSchema.index({ examId: 1, studentId: 1, attemptNumber: 1 }, { unique: true });
+ExamAttemptSchema.index(
+  { studentId: 1 },
+  { unique: true, partialFilterExpression: { status: 'IN_PROGRESS' } }
+);
 
 export const ExamAttempt = mongoose.model<IExamAttemptDocument>('ExamAttempt', ExamAttemptSchema);

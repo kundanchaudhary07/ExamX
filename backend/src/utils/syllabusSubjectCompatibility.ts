@@ -30,7 +30,13 @@ const DOMAIN_SIGNALS: Record<SubjectDomain, { label: string; cues: Array<{ weigh
       { weight: 3, pattern: /\bnormalization\b/i },
       { weight: 2, pattern: /\bprimary keys?\b|\bforeign keys?\b/i },
       { weight: 2, pattern: /\btransactions?\b/i },
-      { weight: 2, pattern: /\bER models?\b|\bentity.relationship models?\b/i }
+      { weight: 4, pattern: /\btransaction management\b/i },
+      { weight: 4, pattern: /\bACID\b/i },
+      { weight: 3, pattern: /\bconcurrency control\b/i },
+      { weight: 3, pattern: /\bserializability\b|\bserializable\b/i },
+      { weight: 2, pattern: /\blocking protocols?\b/i },
+      { weight: 2, pattern: /\bER models?\b|\bentity.relationship models?\b/i },
+      { weight: 2, pattern: /\bquery processing\b|\brelational algebra\b/i }
     ]
   },
   OPERATING_SYSTEMS: {
@@ -79,26 +85,42 @@ function scoreDomain(text: string, domain: SubjectDomain): number {
   );
 }
 
+function subjectTextMatchScore(subject: string, text: string): number {
+  const ignored = new Set(['and', 'of', 'the', 'for', 'in', 'to', 'introduction', 'fundamentals', 'principles']);
+  const subjectTerms = subject.toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter((term) => term.length > 2 && !ignored.has(term))
+    .map((term) => term.endsWith('s') ? term.slice(0, -1) : term);
+  if (!subjectTerms.length) return 0;
+
+  const normalizedText = text.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  const matched = subjectTerms.filter((term) =>
+    new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}s?\\b`).test(normalizedText)
+  );
+  return matched.length / subjectTerms.length;
+}
+
 export function checkSyllabusSubjectCompatibility(
   selectedSubject: string,
   syllabusText: string
 ): SyllabusSubjectCompatibility {
   const selected = selectedSubject.trim();
   const selectedDomain = resolveSubjectDomain(selected);
-  if (!selectedDomain || !syllabusText.trim()) {
-    return { compatible: true, selectedSubject: selected };
-  }
+  if (!syllabusText.trim()) return { compatible: false, selectedSubject: selected };
 
   const scores = (Object.keys(DOMAIN_SIGNALS) as SubjectDomain[])
     .map((domain) => ({ domain, score: scoreDomain(syllabusText, domain) }))
     .sort((left, right) => right.score - left.score);
   const strongest = scores[0];
-  const selectedScore = scoreDomain(syllabusText, selectedDomain);
+  const selectedScore = selectedDomain ? scoreDomain(syllabusText, selectedDomain) : 0;
+  const textMatch = subjectTextMatchScore(selected, syllabusText);
 
   if (
+    selectedDomain &&
     strongest.domain !== selectedDomain &&
     strongest.score >= 10 &&
-    selectedScore <= 1 &&
+    selectedScore <= 4 &&
     strongest.score - selectedScore >= 8
   ) {
     return {
@@ -108,15 +130,21 @@ export function checkSyllabusSubjectCompatibility(
     };
   }
 
-  return { compatible: true, selectedSubject: selected };
+  const compatible = textMatch >= 0.75 || (selectedDomain !== undefined && selectedScore >= 3);
+  if (compatible) return { compatible: true, selectedSubject: selected };
+
+  return {
+    compatible: false,
+    selectedSubject: selected,
+    ...(strongest.score > 0 ? { detectedTopic: DOMAIN_SIGNALS[strongest.domain].label } : {})
+  };
 }
 
 export function createSyllabusSubjectMismatchError(
   compatibility: SyllabusSubjectCompatibility
 ): Error & { statusCode: number; code: string } {
   const error = new Error(
-    `Syllabus may not match the selected subject. Selected subject: ${compatibility.selectedSubject}. ` +
-    `Detected syllabus topic: ${compatibility.detectedTopic}. Please select the matching subject or upload the correct syllabus.`
+    'You have uploaded/selected the wrong subject. Please upload the syllabus for the selected subject.'
   ) as Error & { statusCode: number; code: string };
   error.statusCode = 422;
   error.code = 'SYLLABUS_SUBJECT_MISMATCH';

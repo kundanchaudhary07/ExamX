@@ -11,6 +11,15 @@ let memoryServer: any = null;
 let usingEmbedded = false;
 let connectingPromise: Promise<string> | null = null;
 
+function getMongoUriRequiredMessage(): string {
+  return 'MONGODB_URI is required for normal local development. Set MONGODB_URI in your .env file before starting the backend. The embedded MongoDB fallback is only allowed for tests.';
+}
+
+function getMongoUriRejectedMessage(uri: string): string {
+  const redactedUri = uri.replace(/(:)([^@/]+)(@)/, ':***@');
+  return `Configured MONGODB_URI is invalid or unreachable (${redactedUri}). Verify the connection string, credentials, and MongoDB network access in your .env file before starting the backend. The embedded MongoDB fallback is only allowed for tests.`;
+}
+
 export const MONGO_BINARY_CACHE_DIR = path.resolve(
   __dirname,
   '../../../node_modules/.cache/mongodb-memory-server'
@@ -41,17 +50,13 @@ export async function connectDatabase(): Promise<string> {
             (isEmbeddedMongoAllowed() ? ' Proceeding with the test-only embedded fallback.' : '')
         );
         if (!isEmbeddedMongoAllowed()) {
-          throw new Error(
-            'MONGODB_URI is required for normal local development. Set MONGODB_URI in your .env file before starting the backend. The embedded MongoDB fallback is only allowed for tests.'
-          );
+          throw new Error(getMongoUriRejectedMessage(uri));
         }
       }
     }
 
     if (!isEmbeddedMongoAllowed()) {
-      throw new Error(
-        'MONGODB_URI is required for normal local development. Set MONGODB_URI in your .env file before starting the backend. The embedded MongoDB fallback is only allowed for tests.'
-      );
+      throw new Error(getMongoUriRequiredMessage());
     }
 
     // Test-only embedded fallback. Not used for normal local development.

@@ -51,7 +51,6 @@ async function close(server: http.Server | undefined): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  process.env.AI_PROVIDER = 'GROQ';
   assert(process.env.GROQ_API_KEY?.trim(), 'GROQ_API_KEY must be configured in the backend environment');
   const mongoUri = ENV.MONGODB_URI;
   assert(mongoUri, 'MONGODB_URI must target examx_test');

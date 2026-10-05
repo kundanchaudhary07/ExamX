@@ -15,7 +15,10 @@ router.post(
   requireRole('STUDENT'),
   async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const request = await UnblockService.requestUnblock(req.body || {}, req.user!);
+      const request = await UnblockService.requestUnblock(
+        { ...(req.body || {}), deviceSessionId: req.get('X-ExamX-Device-Session') || '' },
+        req.user!
+      );
       res.status(201).json({
         success: true,
         data: { request }
@@ -76,7 +79,10 @@ router.post(
   requireRole('STUDENT'),
   async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const event = await ProctoringService.recordEvent(req.body || {}, req.user!);
+      const event = await ProctoringService.recordEvent(
+        { ...(req.body || {}), deviceSessionId: req.get('X-ExamX-Device-Session') || '' },
+        req.user!
+      );
       res.status(201).json({
         success: true,
         data: { event }

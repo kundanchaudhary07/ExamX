@@ -5,9 +5,11 @@ import { ExamService } from './exam.service';
 import { UploadedSyllabusInput, validateAndExtractSyllabus } from '../utils/syllabusExtractor';
 import { SubjectService } from './subject.service';
 import {
+  createSyllabusSubjectMismatchError,
   checkSyllabusSubjectCompatibility,
   SyllabusSubjectCompatibility
 } from '../utils/syllabusSubjectCompatibility';
+import { extractSyllabusUnits } from '../utils/syllabusUnits';
 
 export interface SyllabusMetadata {
   syllabusId: string;
@@ -23,6 +25,7 @@ export interface SyllabusMetadata {
 
 export interface SyllabusUploadMetadata extends SyllabusMetadata {
   subjectCompatibility: SyllabusSubjectCompatibility;
+  availableUnits: string[];
 }
 
 export class SyllabusService {
@@ -52,6 +55,10 @@ export class SyllabusService {
       err.code = 'INSUFFICIENT_SYLLABUS_CONTEXT';
       throw err;
     }
+    const subjectCompatibility = checkSyllabusSubjectCompatibility(subject, extracted.text);
+    if (!subjectCompatibility.compatible) {
+      throw createSyllabusSubjectMismatchError(subjectCompatibility);
+    }
     const normalizedSubject = await SubjectService.ensure(subject, user.userId);
     const syllabus = await Syllabus.create({
       syllabusId: `SYL-${randomUUID()}`,
@@ -69,7 +76,8 @@ export class SyllabusService {
 
     return {
       ...this.toMetadata(syllabus),
-      subjectCompatibility: checkSyllabusSubjectCompatibility(normalizedSubject, extracted.text)
+      subjectCompatibility,
+      availableUnits: extractSyllabusUnits(extracted.text).map((unit) => unit.name)
     };
   }
 

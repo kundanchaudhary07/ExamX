@@ -76,49 +76,59 @@ export const KpiCard: React.FC<KpiCardProps> = ({
   isLoading,
   onClick,
   badge
-}) => (
-  (() => {
-    return (
-  <div
-    onClick={onClick}
-    className={`bg-white dark:bg-slate-800 p-4 sm:p-4.5 rounded-xl border border-slate-200 dark:border-slate-700 transition-colors ${
-      onClick ? 'cursor-pointer hover:border-blue-500 dark:hover:border-blue-500' : ''
-    }`}
-  >
-    <div className="flex items-center justify-between gap-2.5">
-      <span className="min-w-0 text-[15px] font-medium text-slate-500 dark:text-slate-400">
-        {label}
+}) => {
+  const content = (
+    <>
+      <span className={`flex min-w-0 items-center justify-between gap-2 font-medium text-slate-500 dark:text-slate-400 ${onClick ? 'text-[13px]' : 'text-[12px]'}`}>
+        <span>{label}</span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {badge && (
+            <span className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+              {badge}
+            </span>
+          )}
+          {icon}
+        </span>
       </span>
-      <div className="flex items-center gap-1.5 shrink-0">
-        {badge && (
-          <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-            {badge}
+      {isLoading ? (
+        <span className={`block ${onClick ? 'mt-2 space-y-1.5' : 'mt-1'}`}>
+          <span className={`block animate-pulse rounded bg-slate-200 dark:bg-slate-700 ${onClick ? 'h-7 w-16' : 'h-4 w-12'}`} />
+          {onClick && <span className="block h-3.5 w-28 animate-pulse rounded bg-slate-100 dark:bg-slate-700/50" />}
+        </span>
+      ) : (
+        <>
+          <span className={`${onClick ? `${getKpiPrimaryValueClass(value)} mt-1` : 'mt-0.5 text-[15px] font-semibold leading-tight'} block min-w-0 text-slate-900 dark:text-white tabular-nums`}>
+            {value}
           </span>
-        )}
-        {icon && <div className="text-slate-400 dark:text-slate-500">{icon}</div>}
+          {(subValue || metadata) && (
+            <span className={`block break-words font-normal leading-snug text-slate-500 dark:text-slate-400 ${onClick ? 'mt-0.5 text-[13px]' : 'mt-0.5 text-[11px]'}`}>
+              {subValue || metadata}
+            </span>
+          )}
+        </>
+      )}
+    </>
+  );
+
+  if (!onClick) {
+    return (
+      <div className="min-w-0 border-l border-slate-200 pl-3 [&_svg]:h-4 [&_svg]:w-4 dark:border-slate-700">
+        {content}
       </div>
-    </div>
-    {isLoading ? (
-      <div className="space-y-1.5 mt-2">
-        <div className="h-7 w-16 bg-slate-200 dark:bg-slate-700 rounded animate-pulse" />
-        <div className="h-3.5 w-28 bg-slate-100 dark:bg-slate-700/50 rounded animate-pulse" />
-      </div>
-    ) : (
-      <>
-        <p className={`${getKpiPrimaryValueClass(value)} min-w-0 text-slate-900 dark:text-white mt-1 tabular-nums`}>
-          {value}
-        </p>
-        {(subValue || metadata) && (
-          <p className="text-[13px] font-normal text-slate-500 dark:text-slate-400 mt-0.5 leading-snug break-words">
-            {subValue || metadata}
-          </p>
-        )}
-      </>
-    )}
-  </div>
     );
-  })()
-);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={`${label}: ${isLoading ? 'Loading' : value}`}
+      className="w-full rounded-xl border border-slate-200 bg-white p-4 text-left transition-colors hover:border-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-500"
+    >
+      {content}
+    </button>
+  );
+};
 
 export const KsiCard = KpiCard;
 
@@ -1530,9 +1540,35 @@ export const ResultDetailModal: React.FC<{
 export const QueryDetailModal: React.FC<{
   query: StudentQuery | null;
   onClose: () => void;
-}> = ({ query, onClose }) => {
+  onResolve?: (
+    queryId: string,
+    payload: {
+      resolutionType: NonNullable<StudentQuery['resolutionType']>;
+      resolutionNotes: string;
+      scoreAdjustment?: number;
+      correctedAnswer?: string;
+    }
+  ) => Promise<void> | void;
+}> = ({ query, onClose, onResolve }) => {
+  const [resolutionType, setResolutionType] =
+    useState<NonNullable<StudentQuery['resolutionType']>>('VALID_QUESTION');
+  const [resolutionNotes, setResolutionNotes] = useState('');
+  const [correctedAnswer, setCorrectedAnswer] = useState('');
+  const [graceMarks, setGraceMarks] = useState('1');
+  const [isResolving, setIsResolving] = useState(false);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setResolutionType('VALID_QUESTION');
+    setResolutionNotes('');
+    setCorrectedAnswer('');
+    setGraceMarks('1');
+    setResolutionError(null);
+  }, [query?.queryId]);
+
   if (!query) return null;
   const qId = query.queryId || query.id;
+  const unresolved = query.status === 'PENDING' || query.status === 'UNDER_REVIEW' || query.status === 'OPEN';
   return (
     <Modal
       isOpen={!!query}
@@ -1555,6 +1591,7 @@ export const QueryDetailModal: React.FC<{
             <span className="font-medium text-slate-900 dark:text-white">
               {query.examTitle || query.subject || query.topic}
             </span>
+            <span className="block font-mono text-[12px] text-slate-500">{query.examId}</span>
           </div>
           <div>
             <span className="text-[13px] text-slate-500 block">Status</span>
@@ -1582,6 +1619,16 @@ export const QueryDetailModal: React.FC<{
               </span>
             </div>
           )}
+          {query.questionNumber ? (
+            <div>
+              <span className="text-[13px] text-slate-500 block">Question Number</span>
+              <span className="font-medium text-slate-900 dark:text-white">Question {query.questionNumber}</span>
+            </div>
+          ) : null}
+          <div>
+            <span className="text-[13px] text-slate-500 block">Issue Category</span>
+            <span className="font-medium text-slate-900 dark:text-white">{query.reasonType.replaceAll('_', ' ')}</span>
+          </div>
         </div>
 
         {query.questionText && query.questionText !== (query.description || query.question || query.message) && (
@@ -1591,6 +1638,31 @@ export const QueryDetailModal: React.FC<{
             </h4>
             <p className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[14px] text-slate-700 dark:text-slate-300 leading-relaxed">
               {query.questionText}
+            </p>
+          </div>
+        )}
+
+        {query.options && query.options.length > 0 && (
+          <div>
+            <h4 className="text-[14px] font-medium text-slate-500 mb-2">Question Options</h4>
+            <ol className="space-y-2">
+              {query.options.map(option => (
+                <li key={option.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[14px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                  <span className="mr-2 font-semibold">{option.id}.</span>{option.text}
+                  {query.studentAnswer === option.id && (
+                    <span className="ml-2 text-[12px] font-semibold text-blue-600 dark:text-blue-400">Student selected</span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {query.studentAnswer && (
+          <div>
+            <h4 className="text-[14px] font-medium text-slate-500 mb-2">Student's Selected Answer</h4>
+            <p className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-[14px] text-blue-900 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+              {query.options?.find(option => option.id === query.studentAnswer)?.text || query.studentAnswer}
             </p>
           </div>
         )}
@@ -1612,6 +1684,91 @@ export const QueryDetailModal: React.FC<{
             <p className="p-4 rounded-lg bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 text-[15px] text-slate-800 dark:text-slate-200 leading-relaxed">
               {query.response || query.reply}
             </p>
+          </div>
+        )}
+
+        {onResolve && unresolved && (
+          <div className="space-y-3 border-t border-slate-200 pt-4 dark:border-slate-700">
+            <h4 className="text-[15px] font-semibold text-slate-900 dark:text-white">Faculty Resolution</h4>
+            <label className="block text-[13px] font-medium text-slate-600 dark:text-slate-300">
+              Resolution
+              <select
+                value={resolutionType}
+                onChange={event => setResolutionType(event.target.value as NonNullable<StudentQuery['resolutionType']>)}
+                className="mt-1 block h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-[14px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <option value="VALID_QUESTION">Valid Question</option>
+                <option value="OUT_OF_SYLLABUS">Out of Syllabus</option>
+                <option value="INVALID_QUESTION">Invalid Question</option>
+                <option value="CORRECT_ANSWER_CHANGED">Correct Answer Changed</option>
+                <option value="GRACE_MARKS">Grace Marks</option>
+                <option value="EXCLUDE_QUESTION">Exclude Question</option>
+              </select>
+            </label>
+            {resolutionType === 'CORRECT_ANSWER_CHANGED' && (
+              <label className="block text-[13px] font-medium text-slate-600 dark:text-slate-300">
+                Correct answer option
+                <select
+                  value={correctedAnswer}
+                  onChange={event => setCorrectedAnswer(event.target.value)}
+                  className="mt-1 block h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-[14px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  <option value="">Select the correct option</option>
+                  {(query.options || []).map(option => (
+                    <option key={option.id} value={option.id}>{option.id}. {option.text}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {resolutionType === 'GRACE_MARKS' && (
+              <label className="block text-[13px] font-medium text-slate-600 dark:text-slate-300">
+                Grace marks
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={graceMarks}
+                  onChange={event => setGraceMarks(event.target.value)}
+                  className="mt-1 block h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-[14px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                />
+              </label>
+            )}
+            <label className="block text-[13px] font-medium text-slate-600 dark:text-slate-300">
+              Resolution notes
+              <textarea
+                rows={3}
+                value={resolutionNotes}
+                onChange={event => setResolutionNotes(event.target.value)}
+                className="mt-1 block w-full rounded-lg border border-slate-200 bg-white p-3 text-[14px] text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              />
+            </label>
+            {resolutionError && <p role="alert" className="text-[13px] text-rose-600">{resolutionError}</p>}
+            <div className="flex justify-end">
+              <button
+                type="button"
+                disabled={isResolving || (resolutionType === 'CORRECT_ANSWER_CHANGED' && !correctedAnswer) || (resolutionType === 'GRACE_MARKS' && !Number.isFinite(Number(graceMarks)))}
+                onClick={async () => {
+                  setIsResolving(true);
+                  setResolutionError(null);
+                  try {
+                    await onResolve(qId, {
+                      resolutionType,
+                      resolutionNotes,
+                      correctedAnswer: resolutionType === 'CORRECT_ANSWER_CHANGED' ? correctedAnswer : undefined,
+                      scoreAdjustment: resolutionType === 'GRACE_MARKS' ? Number(graceMarks) : undefined
+                    });
+                    onClose();
+                  } catch (error: any) {
+                    setResolutionError(error?.message || 'Unable to save the faculty resolution.');
+                  } finally {
+                    setIsResolving(false);
+                  }
+                }}
+                className="h-10 rounded-lg bg-blue-600 px-4 text-[14px] font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {isResolving ? 'Saving...' : 'Save Resolution'}
+              </button>
+            </div>
           </div>
         )}
       </div>

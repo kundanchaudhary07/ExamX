@@ -23,7 +23,8 @@ async function apiRequest(
   token?: string
 ): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'X-ExamX-Device-Session': '00000000-0000-4000-8000-000000000001'
   };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
@@ -172,7 +173,7 @@ async function runPhase13Tests() {
       },
       t1Token
     );
-    if (!process.env.GEMINI_API_KEY) {
+    if (!process.env.GROQ_API_KEY) {
       assert.strictEqual(aiGenRes.status, 503);
       assert.strictEqual(aiGenRes.body.code, 'AI_GENERATION_NOT_CONFIGURED');
     } else {

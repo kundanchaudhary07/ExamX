@@ -20,6 +20,11 @@ interface ProctoringProps {
     details: string
   ) => void;
   onScreenshotDetected?: (details: string) => void;
+  onMonitoringUpdate?: (state: {
+    cameraStatus: 'ACTIVE' | 'OFFLINE' | 'UNKNOWN';
+    faceStatus: 'DETECTED' | 'NOT_DETECTED' | 'MULTIPLE' | 'UNKNOWN';
+    fullscreenActive: boolean;
+  }) => void;
   isExamActive: boolean;
   warningCount?: number;
   maxWarnings?: number;
@@ -27,12 +32,14 @@ interface ProctoringProps {
 
 export interface ProctoringHandle {
   stopMediaStream: () => void;
+  requestFullscreen: () => Promise<boolean>;
 }
 
 export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
   onViolation,
   onProctoringEvent,
   onScreenshotDetected,
+  onMonitoringUpdate,
   isExamActive,
   warningCount = 0,
   maxWarnings = 5
@@ -49,6 +56,7 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
   const [status, setStatus] = useState<'SECURE' | 'WARNING' | 'CRITICAL'>('SECURE');
   const [warningMessage, setWarningMessage] = useState<string>('');
   const [isFullscreen, setIsFullscreen] = useState<boolean>(Boolean(document.fullscreenElement));
+  const [faceStatus, setFaceStatus] = useState<'DETECTED' | 'NOT_DETECTED' | 'MULTIPLE' | 'UNKNOWN'>('UNKNOWN');
 
   const lastViolationTimeRef = useRef<number>(0);
   const lastScreenshotTimeRef = useRef<number>(0);
@@ -59,6 +67,18 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
   onProctoringEventRef.current = onProctoringEvent;
   const onScreenshotDetectedRef = useRef(onScreenshotDetected);
   onScreenshotDetectedRef.current = onScreenshotDetected;
+  const onMonitoringUpdateRef = useRef(onMonitoringUpdate);
+  onMonitoringUpdateRef.current = onMonitoringUpdate;
+
+  useEffect(() => {
+    const cameraStatus =
+      cameraState === 'ACTIVE' || cameraState === 'GRANTED'
+        ? 'ACTIVE'
+        : cameraState === 'IDLE' || cameraState === 'REQUESTING'
+        ? 'UNKNOWN'
+        : 'OFFLINE';
+    onMonitoringUpdateRef.current?.({ cameraStatus, faceStatus, fullscreenActive: isFullscreen });
+  }, [cameraState, faceStatus, isFullscreen]);
 
   const triggerEvent = useCallback(
     (
@@ -141,7 +161,23 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
     setCameraState('STOPPED');
   }, []);
 
-  useImperativeHandle(ref, () => ({ stopMediaStream }), [stopMediaStream]);
+  const requestExamFullscreen = useCallback(async (): Promise<boolean> => {
+    if (document.fullscreenElement) return true;
+    if (!document.documentElement.requestFullscreen) return false;
+    try {
+      await document.documentElement.requestFullscreen();
+      setIsFullscreen(true);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({ stopMediaStream, requestFullscreen: requestExamFullscreen }),
+    [stopMediaStream, requestExamFullscreen]
+  );
 
   const attachStreamToVideo = useCallback((video: HTMLVideoElement | null, stream: MediaStream | null) => {
     if (!video || !stream) return;
@@ -265,6 +301,10 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
         triggerEvent('CAMERA_OFF', 'HIGH', 'Camera feed disconnected during active examination');
       };
     } catch (err: any) {
+      if (requestId !== streamRequestIdRef.current || !isExamActiveRef.current) {
+        acquiredStream?.getTracks().forEach((track) => track.stop());
+        return;
+      }
       if (acquiredStream && streamRef.current === acquiredStream) {
         stopMediaStream();
       } else if (acquiredStream) {
@@ -379,6 +419,12 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
         triggerEvent('FULLSCREEN_EXIT', 'MEDIUM', 'Exited fullscreen examination mode');
       }
     };
+    const handleWindowBlur = () => {
+      triggerEvent('WINDOW_BLUR', 'MEDIUM', 'Examination window lost focus');
+    };
+    const handleWindowFocus = () => {
+      onProctoringEventRef.current?.('WINDOW_FOCUS', 'LOW', 'Examination window regained focus');
+    };
 
     const handleCopy = (e: ClipboardEvent) => {
       e.preventDefault();
@@ -430,6 +476,8 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('focus', handleWindowFocus);
     document.addEventListener('copy', handleCopy);
     document.addEventListener('paste', handlePaste);
     document.addEventListener('contextmenu', handleContextMenu);
@@ -439,6 +487,8 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('focus', handleWindowFocus);
       document.removeEventListener('copy', handleCopy);
       document.removeEventListener('paste', handlePaste);
       document.removeEventListener('contextmenu', handleContextMenu);
@@ -464,14 +514,17 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
           const faces = await detector.detect(videoRef.current);
           if (stream !== streamRef.current || !isExamActiveRef.current) return;
           if (faces.length === 0) {
+            setFaceStatus('NOT_DETECTED');
             consecutiveNoFaceCount++;
             if (consecutiveNoFaceCount >= 3) {
               triggerEvent('NO_FACE', 'HIGH', 'Candidate face not detected in camera frame');
             }
           } else if (faces.length > 1) {
+            setFaceStatus('MULTIPLE');
             consecutiveNoFaceCount = 0;
             triggerEvent('MULTIPLE_FACES', 'CRITICAL', `Multiple faces (${faces.length}) detected in camera view`);
           } else {
+            setFaceStatus('DETECTED');
             consecutiveNoFaceCount = 0;
           }
         }
@@ -488,17 +541,6 @@ export const ProctoringModule = forwardRef<ProctoringHandle, ProctoringProps>(({
       }
     };
   }, [isExamActive, cameraState, triggerEvent]);
-
-  const requestExamFullscreen = async () => {
-    try {
-      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen();
-        setIsFullscreen(true);
-      }
-    } catch {
-      // Ignore if blocked by sandbox permissions
-    }
-  };
 
   return (
     <div className="bg-slate-900 text-white p-4 sm:p-5 rounded-xl shadow-lg border border-slate-700 w-full">
