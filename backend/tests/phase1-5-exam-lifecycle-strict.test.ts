@@ -529,6 +529,118 @@ async function runPhase15Tests() {
     assert.strictEqual(publishedExamResult.totalMarks, 10);
     console.log('✓ 4. RBAC, lifecycle transitions, student attempt, and result publication passed');
 
+    const regressionQuestionIds: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const questionResponse = await apiRequest(
+        'POST',
+        '/api/questions',
+        {
+          questionText: `Partial-mark regression question ${index + 1}`,
+          subject: 'Operating Systems',
+          topic: 'Scoring regression',
+          difficulty: 'EASY',
+          marks: 1,
+          options: [
+            { key: 'A', text: 'Correct answer' },
+            { key: 'B', text: 'Incorrect answer' }
+          ],
+          correctOption: 'A'
+        },
+        teacherAToken
+      );
+      assert.strictEqual(questionResponse.status, 201);
+      regressionQuestionIds.push(questionResponse.body.data.question.questionId);
+    }
+    const regressionQuestionRecords = await Question.find({
+      questionId: { $in: regressionQuestionIds }
+    }).lean();
+    assert.strictEqual(regressionQuestionRecords.length, 5);
+    assert.ok(
+      regressionQuestionRecords.every(
+        question => question.marks === 1 && question.correctOption === 'A'
+      ),
+      'Regression questions must each be worth 1 mark with A as the correct answer'
+    );
+
+    const regressionExamResponse = await apiRequest(
+      'POST',
+      '/api/exams',
+      {
+        title: 'Partial-mark scoring regression',
+        subject: 'Operating Systems',
+        course: 'B.Tech CSE',
+        semester: 'Semester 4',
+        durationMinutes: 45,
+        totalMarks: 5,
+        passingMarks: 3,
+        questionIds: regressionQuestionIds,
+        assignedStudentIds: [student2Id],
+        startTime: validStartIso,
+        endTime: validEndIso
+      },
+      adminToken
+    );
+    assert.strictEqual(regressionExamResponse.status, 201);
+    const regressionExamId = regressionExamResponse.body.data.exam.examId;
+    for (const status of ['SCHEDULED', 'LIVE']) {
+      const statusResponse = await apiRequest(
+        'PATCH',
+        `/api/exams/${regressionExamId}/status`,
+        { status },
+        adminToken
+      );
+      assert.strictEqual(statusResponse.status, 200);
+    }
+
+    const regressionStartResponse = await apiRequest(
+      'POST',
+      `/api/student/exams/${regressionExamId}/start`,
+      {},
+      student2Token
+    );
+    assert.strictEqual(regressionStartResponse.status, 201);
+    const regressionQuestions = regressionStartResponse.body.data.questions;
+    assert.strictEqual(regressionQuestions.length, 5);
+    const regressionAttemptId = regressionStartResponse.body.data.attempt.attemptId;
+
+    const regressionSubmitResponse = await apiRequest(
+      'POST',
+      `/api/student/attempts/${regressionAttemptId}/submit`,
+      {
+        answers: [{ questionId: regressionQuestions[0].questionId, selectedOption: 'A' }]
+      },
+      student2Token
+    );
+    assert.strictEqual(regressionSubmitResponse.status, 200);
+
+    const [regressionAttempt, storedRegressionResult, regressionResultResponse] = await Promise.all([
+      ExamAttempt.findOne({ attemptId: regressionAttemptId }).lean(),
+      Result.findOne({ attemptId: regressionAttemptId }).lean(),
+      apiRequest('GET', `/api/results/exam/${regressionExamId}`, undefined, adminToken)
+    ]);
+    assert.ok(regressionAttempt);
+    assert.strictEqual(regressionAttempt.score, 1);
+    assert.strictEqual(regressionAttempt.totalMarks, 5);
+    assert.strictEqual(regressionAttempt.percentage, 20);
+    assert.ok(storedRegressionResult);
+    assert.strictEqual(storedRegressionResult.score, 1);
+    assert.strictEqual(storedRegressionResult.totalMarks, 5);
+    assert.strictEqual(storedRegressionResult.percentage, 20);
+    assert.strictEqual(regressionResultResponse.status, 200);
+    const regressionResult = regressionResultResponse.body.data.results.find(
+      (result: any) => result.attemptId === regressionAttemptId
+    );
+    assert.ok(regressionResult, 'Result API must return the evaluated attempt');
+    assert.strictEqual(regressionResult.score, 1);
+    assert.strictEqual(regressionResult.totalMarks, 5);
+    assert.strictEqual(regressionResult.percentage, 20);
+    assert.strictEqual(regressionResult.answers.filter((answer: any) => answer.isCorrect).length, 1);
+    assert.strictEqual(
+      regressionResult.answers.filter((answer: any) => !answer.selectedOption).length,
+      4
+    );
+    console.log('✓ Partial-mark regression: 1 correct + 4 unanswered yields 1/5 marks and 20%');
+
     const createLiveSharedExam = async (title: string): Promise<string> => {
       const response = await apiRequest(
         'POST',
@@ -865,6 +977,10 @@ async function runPhase15Tests() {
     console.log('✓ 5. Multi-student force-end idempotency, stale-lock release, admin deletion, and Question Bank preservation passed');
 
     // Clean up test artifacts
+    await Result.deleteMany({ examId: regressionExamId });
+    await ExamAttempt.deleteMany({ examId: regressionExamId });
+    await ExamAssignment.deleteMany({ examId: regressionExamId });
+    await Exam.deleteOne({ examId: regressionExamId });
     await Exam.deleteMany({ examId });
     await ExamAssignment.deleteMany({ examId });
     await Question.deleteMany({ createdBy: teacherAId });
