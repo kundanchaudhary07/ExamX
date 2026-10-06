@@ -46,6 +46,8 @@ import {
   QueryDetailModal,
   KpiCard,
   getKpiPrimaryValueClass,
+  PageMotionShell,
+  ScrollReveal,
   ProctoringDetailModal,
   useConfirmAction
 } from '../common/SharedUI';
@@ -1687,7 +1689,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   };
 
   return (
-    <div className="w-full max-w-[1440px] mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
+    <PageMotionShell>
+      <div className="w-full max-w-[1440px] mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
         <div>
@@ -1775,7 +1778,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       {activeTab === 'overview' && (
         <div className="space-y-6">
           {/* Real Backend Modern KSI Summary Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
             <KpiCard
               label="Supervised Students"
               value={students.length}
@@ -1836,9 +1839,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 onClick={() => onNavigateTab('ai_generator')}
               />
             )}
-          </div>
+          </ScrollReveal>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <ScrollReveal className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Recent Exams */}
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
               <div className="flex items-center justify-between mb-4">
@@ -1894,7 +1897,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 Results are loaded only after selecting an authorized exam.
               </p>
             </div>
-          </div>
+          </ScrollReveal>
         </div>
       )}
 
@@ -1902,7 +1905,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       {activeTab === 'students' && (
         <div className="space-y-6">
           {/* Supervised Students KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Supervised Students"
               value={students.length}
@@ -1932,9 +1935,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               onClick={() => onNavigateTab('queries')}
               isLoading={isLoadingDirectory}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Students ({students.length})
@@ -1946,14 +1949,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             >
               Add Student
             </button>
-          </div>
+            </div>
 
           {students.length === 0 ? (
             <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
               No students yet.
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollReveal className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
@@ -2032,14 +2035,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollReveal>
           )}
-        </div>
+        </ScrollReveal>
         </div>
       )}
 
       {/* 3. EXAMS TAB */}
       {activeTab === 'exams' && (
+        <ScrollReveal>
         <TeacherExamScheduler
           exams={exams}
           questions={questions}
@@ -2066,13 +2070,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           }}
           savedDraft={savedExamDraft}
         />
+        </ScrollReveal>
       )}
 
       {/* 4. QUESTION BANK TAB */}
       {activeTab === 'questions' && (
         <div className="space-y-6">
           {/* Question Bank KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Total Questions"
               value={questions.length}
@@ -2097,9 +2102,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               subValue="Authored questions"
               icon={<FileText className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Question Bank ({filteredManualQuestions.length + filteredUnbatchedAiQuestions.length + matchingAiBatchQuestionCount})
@@ -2137,7 +2142,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           </div>
 
-          <div className="p-5">
+          <ScrollReveal className="p-5">
             <AiGenerationBatchCards
               batches={aiGenerationBatches}
               search={questionSearch}
@@ -2161,7 +2166,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               onReviewBatch={() => onNavigateTab('ai_generator')}
               emptyMessage="No AI generation batches match these filters."
             />
-          </div>
+          </ScrollReveal>
 
           {filteredManualQuestions.length === 0 ? (
             <div className="p-12 text-center text-[15px] text-slate-500 dark:text-slate-400">
@@ -2170,7 +2175,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 : 'No questions in the question bank.'}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollReveal className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
@@ -2264,9 +2269,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollReveal>
           )}
-        </div>
+        </ScrollReveal>
         </div>
       )}
 
@@ -2274,7 +2279,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       {activeTab === 'ai_generator' && (
         <div className="space-y-6">
           {/* AI Generation KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="AI Engine Status"
               value={
@@ -2305,9 +2310,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               subValue={extractedSyllabus?.fileName || 'A faculty syllabus is required'}
               icon={<Upload className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-5">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-5">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white flex items-center gap-2.5 leading-snug">
@@ -2598,10 +2603,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 {isGeneratingAI ? 'Generating...' : 'Generate Drafts'}
               </button>
             </form>
-          </div>
+          </ScrollReveal>
 
           {/* Teacher Review Queue */}
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
@@ -2766,13 +2771,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 })}
               </div>
             )}
+          </ScrollReveal>
           </div>
-        </div>
       )}
 
       {/* 6. EXAM MONITORING (PROCTORING) TAB */}
       {activeTab === 'monitoring' && (
-        <div className="space-y-5">
+        <ScrollReveal className="space-y-5">
           {!selectedMonitoringExamId && (
           <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
@@ -3244,11 +3249,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           )}
           </>
           )}
-        </div>
+        </ScrollReveal>
       )}
 
       {activeTab === 'monitoring_history' && (
-        <div className="space-y-5">
+        <ScrollReveal className="space-y-5">
           {historyExamId ? (
             <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
               <div className="border-b border-slate-200 p-4 dark:border-slate-700">
@@ -3283,12 +3288,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               {historyExams.length === 0 ? <p className="p-10 text-center text-sm text-slate-500">No completed exams available.</p> : <><div className="divide-y divide-slate-100 dark:divide-slate-700">{pageHistoryExams.map(exam => <div key={exam.examId || exam.id} className="flex items-center justify-between gap-4 p-4"><div><p className="font-medium text-slate-900 dark:text-white">{exam.title}</p><p className="mt-1 font-mono text-xs text-slate-500">{exam.examId || exam.id} · {exam.subject} · {exam.status}</p></div><button type="button" onClick={() => { setRecordPage(1); setHistoryExamId(exam.examId || exam.id); }} className="rounded-md border border-blue-200 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-950/30">View report</button></div>)}</div><div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {historyExamPageCount} · {matchingHistoryExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= historyExamPageCount} onClick={() => setRecordPage(page => Math.min(historyExamPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div></>}
             </section>
           )}
-        </div>
+        </ScrollReveal>
       )}
 
       {/* 7. RESULTS TAB */}
       {activeTab === 'results' && (
-        <div className="space-y-5">
+        <ScrollReveal className="space-y-5">
           {selectedResultExamId ? (
             <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
@@ -3333,12 +3338,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {examPageCount} · {matchingExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= examPageCount} onClick={() => setRecordPage(page => Math.min(examPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
             </section>
           )}
-        </div>
+        </ScrollReveal>
       )}
 
       {/* 8. QUERIES TAB */}
       {activeTab === 'queries' && (
-        <div className="space-y-5">
+        <ScrollReveal className="space-y-5">
           {selectedQueryExamId ? (
             <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
@@ -3362,7 +3367,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs dark:border-slate-700"><span>Page {recordPage} of {examPageCount} · {matchingExams.length} exams</span><div className="flex gap-2"><button type="button" disabled={recordPage <= 1} onClick={() => setRecordPage(page => Math.max(1, page - 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Previous</button><button type="button" disabled={recordPage >= examPageCount} onClick={() => setRecordPage(page => Math.min(examPageCount, page + 1))} className="rounded border border-slate-200 px-3 py-1 disabled:opacity-40 dark:border-slate-700">Next</button></div></div>
             </section>
           )}
-        </div>
+        </ScrollReveal>
       )}
 
       {/* 10. PROFILE TAB */}
@@ -3778,7 +3783,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           ) : (
             <div className="space-y-6">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700 text-[14px]">
+                <ScrollReveal className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700 text-[14px]">
                   <div>
                     <span className="text-[13px] text-slate-400 block">Full Name</span>
                     <span className="font-semibold text-slate-900 dark:text-white text-[15px]">
@@ -3859,7 +3864,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                         : '—'}
                     </span>
                   </div>
-                </div>
+                </ScrollReveal>
                 <StudentAssessmentSections details={selectedStudentDetails} />
               </div>
             )}
@@ -4161,5 +4166,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
       <ConfirmModal />
     </div>
+    </PageMotionShell>
   );
 };

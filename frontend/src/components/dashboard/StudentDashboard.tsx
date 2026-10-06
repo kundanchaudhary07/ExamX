@@ -7,6 +7,7 @@ import { ProctoringExamInsightsModal } from './ProctoringExamInsightsModal';
 import { OverallPerformanceSection } from './OverallPerformanceSection';
 import {
   PageHeader,
+  PageMotionShell,
   KpiCard,
   StatusBadge,
   EmptyState,
@@ -17,6 +18,7 @@ import {
   ResultDetailModal,
   QueryDetailModal,
   ExamDetailModal,
+  ScrollReveal,
   useConfirmAction
 } from '../common/SharedUI';
 import {
@@ -488,7 +490,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   };
 
   return (
-    <div className="max-w-[1440px] w-full mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
+    <PageMotionShell>
+      <div className="max-w-[1440px] w-full mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
       <PageHeader
         title={pageTitleMap[activeTab] || 'Dashboard'}
         subtitle={`${user.name} · ID: ${user.userId || user.id} · ${user.department || 'Student'}`}
@@ -540,7 +543,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {activeTab === 'overview' && (
         <div className="space-y-6">
           {/* Student KPI Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             <KpiCard
               label="Available Exams"
               value={availableExams.length}
@@ -578,9 +581,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               icon={<Award className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
               onClick={() => onNavigateTab('results')}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <ScrollReveal className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Assigned Exams */}
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
               <div className="flex items-center justify-between mb-4">
@@ -688,7 +691,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                   {publishedResults.slice(0, 5).map(res => (
                     <div
                       key={res.id}
-                      className="py-3.5 flex items-center justify-between text-[15px]"
+                      className="examx-motion-row rounded-lg px-2 py-3.5 flex items-center justify-between text-[15px]"
                     >
                       <div>
                         <button
@@ -714,7 +717,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 </div>
               )}
             </div>
-          </div>
+          </ScrollReveal>
         </div>
       )}
 
@@ -722,7 +725,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {activeTab === 'exams' && (
         <div className="space-y-6">
           {/* Exams KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Total Assigned"
               value={exams.length}
@@ -747,9 +750,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               subValue={`${publishedResults.length} Results published`}
               icon={<CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal delay={60} className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Available Exams ({visibleAvailableExams.length})
@@ -766,7 +769,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 return (
                   <article
                     key={exId}
-                    className="flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800"
+                    className="examx-motion-card flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -828,7 +831,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               })}
             </div>
           )}
-        </div>
+          </ScrollReveal>
         </div>
       )}
 
@@ -836,7 +839,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {activeTab === 'history' && (
         <div className="space-y-6">
           {/* Exam History KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Completed Attempts"
               value={completedExams.length}
@@ -861,9 +864,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               subValue={`${publishedResults.length - passedResultsCount} Below passing mark`}
               icon={<CheckCircle className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Exam History ({examHistory.length})
@@ -873,7 +876,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           {examHistory.length === 0 ? (
             <EmptyState message="No exams yet." />
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollReveal className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
@@ -936,9 +939,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                   })}
                 </tbody>
               </table>
-            </div>
+            </ScrollReveal>
           )}
-        </div>
+        </ScrollReveal>
         </div>
       )}
 
@@ -946,7 +949,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {activeTab === 'results' && (
         <div className="space-y-6">
           {/* Results KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Published Results"
               value={publishedResults.length}
@@ -971,9 +974,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               subValue={`${publishedResults.length - passedResultsCount} Below passing mark`}
               icon={<CheckCircle className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Exam Results ({attemptedExamRows.length})
@@ -983,7 +986,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
             {attemptedExamRows.length === 0 ? (
               <EmptyState message="No exam attempts yet." />
             ) : (
-              <div className="overflow-x-auto">
+              <ScrollReveal className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
@@ -1044,16 +1047,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                     })}
                   </tbody>
                 </table>
-              </div>
+              </ScrollReveal>
             )}
-          </div>
+          </ScrollReveal>
 
         </div>
       )}
 
       {activeTab === 'analytics' && (
         <div className="space-y-5">
-          <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
+          <ScrollReveal delay={40} className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800">
             <h2 className="mb-2 text-[20px] font-semibold text-slate-900 dark:text-white">
               Performance trend
             </h2>
@@ -1062,12 +1065,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
             ) : (
               <PerformanceTrendChart data={[...publishedResults].reverse()} />
             )}
-          </section>
-          <OverallPerformanceSection
-            results={publishedResults}
-            studentId={user.userId || user.id}
-            studentRankings={studentRankings}
-          />
+          </ScrollReveal>
+          <ScrollReveal delay={60}>
+            <OverallPerformanceSection
+              results={publishedResults}
+              studentId={user.userId || user.id}
+              studentRankings={studentRankings}
+            />
+          </ScrollReveal>
         </div>
       )}
 
@@ -1075,7 +1080,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {activeTab === 'queries' && (
         <div className="space-y-6">
           {/* Queries KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Total Queries"
               value={myQueries.length}
@@ -1100,9 +1105,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               subValue="Distinct examinations"
               icon={<FileText className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal delay={60} className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Queries ({myQueries.length})
@@ -1177,14 +1182,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               </table>
             </div>
           )}
-        </div>
+          </ScrollReveal>
         </div>
       )}
 
       {/* 6. PROCTORING STATUS TAB */}
       {activeTab === 'proctoring' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Proctoring Status"
               value={proctoringStanding}
@@ -1209,9 +1214,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               subValue="Real-time compliance rating"
               icon={<Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-6">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6 space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Proctoring Audit Trail ({ownProctoringEvents.length})
@@ -1225,7 +1230,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
             ) : proctoringExamSummaries.length === 0 ? (
                 <EmptyState message="No proctoring events recorded" />
               ) : (
-                <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl">
+                <ScrollReveal className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
@@ -1260,9 +1265,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                       ))}
                     </tbody>
                 </table>
-              </div>
+              </ScrollReveal>
             )}
-        </div>
+        </ScrollReveal>
         {selectedProctoringExamId && (
           <ProctoringExamInsightsModal
             exam={exams.find(exam => exam.examId === selectedProctoringExamId)}
@@ -1280,6 +1285,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {/* 7. PROFILE TAB */}
       {activeTab === 'profile' && (
         <div className="space-y-5">
+          <ScrollReveal>
           <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
             <div className="flex min-w-0 items-center gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-blue-100 text-lg font-bold text-blue-700 dark:bg-blue-900/50 dark:text-blue-200">
@@ -1297,7 +1303,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               </button>
             </div>
           </section>
+          </ScrollReveal>
 
+          <ScrollReveal>
           <section className="max-w-2xl rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
               <h3 className="mb-4 text-base font-semibold text-slate-900 dark:text-white">Profile information</h3>
               <dl className="divide-y divide-slate-100 text-sm dark:divide-slate-700">
@@ -1317,7 +1325,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 ))}
               </dl>
           </section>
+          </ScrollReveal>
 
+          <ScrollReveal>
           <section className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-700 dark:bg-slate-800">
             <h3 className="mb-3 text-base font-semibold text-slate-900 dark:text-white">Security</h3>
             <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">Update your account password. ExamX will never display your password.</p>
@@ -1333,6 +1343,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               </div>
             </form>
           </section>
+          </ScrollReveal>
         </div>
       )}
 
@@ -1419,5 +1430,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       {/* Global Action Confirmation Modal */}
       <ConfirmModal />
     </div>
+    </PageMotionShell>
   );
 };

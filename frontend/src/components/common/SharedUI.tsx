@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X,
@@ -31,8 +31,73 @@ interface PageHeaderProps {
   actions?: React.ReactNode;
 }
 
+export const PageMotionShell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="animate-fade-in">{children}</div>
+);
+
+type ScrollRevealRoot = React.RefObject<Element | null>;
+const ScrollRevealRootContext = React.createContext<ScrollRevealRoot | null>(null);
+
+interface ScrollRevealProps {
+  children: React.ReactNode;
+  className?: string;
+  delay?: number;
+  root?: ScrollRevealRoot;
+}
+
+export const ScrollReveal: React.FC<ScrollRevealProps> = ({
+  children,
+  className = '',
+  delay = 0,
+  root
+}) => {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [isVisible, setIsVisible] = useState(false);
+  const modalRoot = useContext(ScrollRevealRootContext);
+  const observerRoot = root || modalRoot;
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (mediaQuery.matches) {
+      setIsVisible(true);
+      return;
+    }
+
+    const node = ref.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      entries => {
+        const entry = entries[0];
+        if (entry && entry.isIntersecting) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      },
+      {
+        root: observerRoot?.current || null,
+        threshold: 0.12,
+        rootMargin: '0px 0px -40px 0px'
+      }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [observerRoot]);
+
+  return (
+    <div
+      ref={ref}
+      className={`scroll-reveal ${isVisible ? 'is-visible' : ''} ${className}`.trim()}
+      style={{ transitionDelay: `${delay}ms` }}
+    >
+      {children}
+    </div>
+  );
+};
+
 export const PageHeader: React.FC<PageHeaderProps> = ({ title, subtitle, actions }) => (
-  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+  <ScrollReveal className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
     <div>
       <h1 className="text-[22px] font-semibold text-slate-900 dark:text-white leading-tight tracking-tight">
         {title}
@@ -44,7 +109,7 @@ export const PageHeader: React.FC<PageHeaderProps> = ({ title, subtitle, actions
       )}
     </div>
     {actions && <div className="flex items-center gap-3 shrink-0">{actions}</div>}
-  </div>
+  </ScrollReveal>
 );
 
 // 2. KpiCard / KsiCard
@@ -66,6 +131,52 @@ export function getKpiPrimaryValueClass(value: string | number): string {
     : 'text-[19px] sm:text-[20px] lg:text-[21px]';
   return `${size} font-semibold leading-[1.15] break-words line-clamp-2`;
 }
+
+export const AnimatedNumber: React.FC<{ value: string | number; className?: string }> = ({ value, className }) => {
+  const numericValue = typeof value === 'number' ? value : Number.parseFloat(String(value).replace(/[^0-9.-]+/g, ''));
+  const suffix = typeof value === 'string' ? String(value).replace(/[0-9.\-]+/g, '') : '';
+  const [displayValue, setDisplayValue] = useState(numericValue);
+  const previousValueRef = useRef(numericValue);
+
+  useEffect(() => {
+    if (!Number.isFinite(numericValue)) {
+      setDisplayValue(Number.NaN);
+      return;
+    }
+
+    const from = previousValueRef.current;
+    const to = numericValue;
+    const duration = 500;
+    const startTime = performance.now();
+    let rafId = 0;
+
+    const tick = (now: number) => {
+      const progress = Math.min((now - startTime) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextValue = from + (to - from) * eased;
+      setDisplayValue(nextValue);
+
+      if (progress < 1) {
+        rafId = requestAnimationFrame(tick);
+      } else {
+        previousValueRef.current = to;
+      }
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [numericValue]);
+
+  if (!Number.isFinite(numericValue)) {
+    return <span className={className}>{value}</span>;
+  }
+
+  const formattedValue = Number.isInteger(displayValue)
+    ? `${Math.round(displayValue)}${suffix}`
+    : `${displayValue.toFixed(1).replace(/\.0$/, '')}${suffix}`;
+
+  return <span className={className}>{formattedValue}</span>;
+};
 
 export const KpiCard: React.FC<KpiCardProps> = ({
   label,
@@ -98,7 +209,7 @@ export const KpiCard: React.FC<KpiCardProps> = ({
       ) : (
         <>
           <span className={`${onClick ? `${getKpiPrimaryValueClass(value)} mt-1` : 'mt-0.5 text-[15px] font-semibold leading-tight'} block min-w-0 text-slate-900 dark:text-white tabular-nums`}>
-            {value}
+            <AnimatedNumber value={value} className="inline-block" />
           </span>
           {(subValue || metadata) && (
             <span className={`block break-words font-normal leading-snug text-slate-500 dark:text-slate-400 ${onClick ? 'mt-0.5 text-[13px]' : 'mt-0.5 text-[11px]'}`}>
@@ -112,7 +223,7 @@ export const KpiCard: React.FC<KpiCardProps> = ({
 
   if (!onClick) {
     return (
-      <div className="min-w-0 border-l border-slate-200 pl-3 [&_svg]:h-4 [&_svg]:w-4 dark:border-slate-700">
+      <div className="examx-motion-card min-w-0 border-l border-slate-200 pl-3 [&_svg]:h-4 [&_svg]:w-4 dark:border-slate-700">
         {content}
       </div>
     );
@@ -123,7 +234,7 @@ export const KpiCard: React.FC<KpiCardProps> = ({
       type="button"
       onClick={onClick}
       aria-label={`${label}: ${isLoading ? 'Loading' : value}`}
-      className="w-full rounded-xl border border-slate-200 bg-white p-4 text-left transition-colors hover:border-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-500"
+      className="examx-motion-card examx-motion-button w-full rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-500"
     >
       {content}
     </button>
@@ -178,7 +289,7 @@ export function getStatusBadgeClasses(status?: string): string {
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => (
   <span
-    className={`inline-flex items-center px-2 py-0.5 rounded text-[11.5px] font-medium border leading-none ${getStatusBadgeClasses(
+    className={`examx-status-badge inline-flex items-center px-2 py-0.5 rounded text-[11.5px] font-medium border leading-none ${getStatusBadgeClasses(
       status
     )}`}
   >
@@ -273,6 +384,8 @@ export const Modal: React.FC<ModalProps> = ({
   footer,
   actions
 }) => {
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     if (!isOpen) return;
     const originalOverflow = document.body.style.overflow;
@@ -358,9 +471,14 @@ export const Modal: React.FC<ModalProps> = ({
         </div>
 
         {/* Scrollable Content Body */}
-        <div className="p-5 sm:p-7 overflow-y-auto flex-1 space-y-6 overscroll-contain">
-          {children}
-        </div>
+        <ScrollRevealRootContext.Provider value={contentRef}>
+          <div
+            ref={contentRef}
+            className="p-5 sm:p-7 overflow-y-auto flex-1 space-y-6 overscroll-contain"
+          >
+            {children}
+          </div>
+        </ScrollRevealRootContext.Provider>
 
         {/* Sticky Footer */}
         {footer && (
@@ -1186,7 +1304,7 @@ export const QuestionDetailModal: React.FC<{
       size="standard"
     >
       <div className="space-y-5">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
+        <ScrollReveal className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
           <div>
             <span className="text-[13px] text-slate-500 block">Subject</span>
             <span className="font-medium text-slate-900 dark:text-white">
@@ -1231,18 +1349,18 @@ export const QuestionDetailModal: React.FC<{
               {question.createdByName || question.createdBy || 'Faculty'}
             </span>
           </div>
-        </div>
+        </ScrollReveal>
 
-        <div>
+        <ScrollReveal>
           <h4 className="text-[14px] font-medium text-slate-500 mb-2">
             Question Statement
           </h4>
           <div className="p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[15px] font-medium text-slate-900 dark:text-white leading-relaxed">
             {question.text}
           </div>
-        </div>
+        </ScrollReveal>
 
-        <div>
+        <ScrollReveal>
           <h4 className="text-[14px] font-medium text-slate-500 mb-2">
             Options & Correct Answer
           </h4>
@@ -1270,17 +1388,17 @@ export const QuestionDetailModal: React.FC<{
               );
             })}
           </div>
-        </div>
+        </ScrollReveal>
 
         {question.explanation && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">
               Explanation
             </h4>
             <p className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[14.5px] text-slate-700 dark:text-slate-300 leading-relaxed">
               {question.explanation}
             </p>
-          </div>
+          </ScrollReveal>
         )}
       </div>
     </Modal>
@@ -1301,7 +1419,7 @@ export const ExamDetailModal: React.FC<{
       size="workspace"
     >
       <div className="space-y-5">
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
+        <ScrollReveal className="grid grid-cols-2 sm:grid-cols-3 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
           <div>
             <span className="text-[13px] text-slate-500 block">Subject</span>
             <span className="font-medium text-slate-900 dark:text-white">{exam.subject}</span>
@@ -1352,17 +1470,17 @@ export const ExamDetailModal: React.FC<{
             <span className="text-[13px] text-slate-500 block">Status</span>
             <StatusBadge status={exam.status} />
           </div>
-        </div>
+        </ScrollReveal>
 
         {exam.instructions && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">
               Examination Instructions
             </h4>
             <p className="p-4 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[14.5px] text-slate-700 dark:text-slate-300 whitespace-pre-line leading-relaxed">
               {exam.instructions}
             </p>
-          </div>
+          </ScrollReveal>
         )}
       </div>
     </Modal>
@@ -1409,7 +1527,7 @@ export const ResultDetailModal: React.FC<{
     >
       <div className="space-y-5">
         {/* Numerical Summary KSI Cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <ScrollReveal className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           <KpiCard
             label="Obtained Marks"
             value={result.score}
@@ -1440,9 +1558,9 @@ export const ResultDetailModal: React.FC<{
             value={unansweredCount !== undefined ? unansweredCount : '—'}
             subValue="Skipped questions"
           />
-        </div>
+        </ScrollReveal>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
+        <ScrollReveal className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
           <div>
             <span className="text-[13px] text-slate-500 block">Student</span>
             <span className="font-medium text-slate-900 dark:text-white">
@@ -1482,10 +1600,10 @@ export const ResultDetailModal: React.FC<{
               </span>
             </div>
           )}
-        </div>
+        </ScrollReveal>
 
         {result.questionBreakdown && result.questionBreakdown.length > 0 && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">
               Question Breakdown ({result.questionBreakdown.length})
             </h4>
@@ -1515,11 +1633,11 @@ export const ResultDetailModal: React.FC<{
                 </tbody>
               </table>
             </div>
-          </div>
+          </ScrollReveal>
         )}
 
         {canPublish && !isPublished && onPublish && (
-          <div className="flex justify-end pt-3 border-t border-slate-200 dark:border-slate-700">
+          <ScrollReveal className="flex justify-end pt-3 border-t border-slate-200 dark:border-slate-700">
             <button
               type="button"
               onClick={() => {
@@ -1530,7 +1648,7 @@ export const ResultDetailModal: React.FC<{
             >
               Publish Result
             </button>
-          </div>
+          </ScrollReveal>
         )}
       </div>
     </Modal>
@@ -1578,7 +1696,7 @@ export const QueryDetailModal: React.FC<{
       size="standard"
     >
       <div className="space-y-5">
-        <div className="grid grid-cols-2 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
+        <ScrollReveal className="grid grid-cols-2 gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 text-[14px]">
           <div>
             <span className="text-[13px] text-slate-500 block">Student</span>
             <span className="font-medium text-slate-900 dark:text-white">{query.studentName}</span>
@@ -1629,21 +1747,21 @@ export const QueryDetailModal: React.FC<{
             <span className="text-[13px] text-slate-500 block">Issue Category</span>
             <span className="font-medium text-slate-900 dark:text-white">{query.reasonType.replaceAll('_', ' ')}</span>
           </div>
-        </div>
+        </ScrollReveal>
 
         {query.questionText && query.questionText !== (query.description || query.question || query.message) && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">
               Question Context
             </h4>
             <p className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[14px] text-slate-700 dark:text-slate-300 leading-relaxed">
               {query.questionText}
             </p>
-          </div>
+          </ScrollReveal>
         )}
 
         {query.options && query.options.length > 0 && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">Question Options</h4>
             <ol className="space-y-2">
               {query.options.map(option => (
@@ -1655,40 +1773,40 @@ export const QueryDetailModal: React.FC<{
                 </li>
               ))}
             </ol>
-          </div>
+          </ScrollReveal>
         )}
 
         {query.studentAnswer && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">Student's Selected Answer</h4>
             <p className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-[14px] text-blue-900 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
               {query.options?.find(option => option.id === query.studentAnswer)?.text || query.studentAnswer}
             </p>
-          </div>
+          </ScrollReveal>
         )}
 
-        <div>
+        <ScrollReveal>
           <h4 className="text-[14px] font-medium text-slate-500 mb-2">
             Student Query
           </h4>
           <p className="p-4 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[15px] text-slate-800 dark:text-slate-200 leading-relaxed">
             {query.description || query.question || query.message}
           </p>
-        </div>
+        </ScrollReveal>
 
         {(query.response || query.reply) && (
-          <div>
+          <ScrollReveal>
             <h4 className="text-[14px] font-medium text-slate-500 mb-2">
               Faculty / Admin Response
             </h4>
             <p className="p-4 rounded-lg bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 text-[15px] text-slate-800 dark:text-slate-200 leading-relaxed">
               {query.response || query.reply}
             </p>
-          </div>
+          </ScrollReveal>
         )}
 
         {onResolve && unresolved && (
-          <div className="space-y-3 border-t border-slate-200 pt-4 dark:border-slate-700">
+          <ScrollReveal className="space-y-3 border-t border-slate-200 pt-4 dark:border-slate-700">
             <h4 className="text-[15px] font-semibold text-slate-900 dark:text-white">Faculty Resolution</h4>
             <label className="block text-[13px] font-medium text-slate-600 dark:text-slate-300">
               Resolution
@@ -1769,7 +1887,7 @@ export const QueryDetailModal: React.FC<{
                 {isResolving ? 'Saving...' : 'Save Resolution'}
               </button>
             </div>
-          </div>
+          </ScrollReveal>
         )}
       </div>
     </Modal>

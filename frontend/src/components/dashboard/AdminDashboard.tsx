@@ -45,6 +45,8 @@ import {
   StatusBadge,
   KpiCard,
   getKpiPrimaryValueClass,
+  PageMotionShell,
+  ScrollReveal,
   useConfirmAction
 } from '../common/SharedUI';
 import {
@@ -1088,7 +1090,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   ).length;
 
   return (
-    <div className="w-full max-w-[1440px] mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
+    <PageMotionShell>
+      <div className="w-full max-w-[1440px] mx-auto px-4 md:px-6 lg:px-8 py-7 space-y-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
         <div>
@@ -1178,7 +1181,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {activeTab === 'overview' && (
         <div className="space-y-6">
           {/* Real Backend Modern KSI Summary Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             <KpiCard
               label="Total Teachers"
               value={teachers.length}
@@ -1256,10 +1259,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               isLoading={isLoadingData}
               onClick={() => onNavigateTab('audit')}
             />
-          </div>
+          </ScrollReveal>
 
           {/* Operational Panels: Recent Exams & Recent Audit Logs */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <ScrollReveal className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Recent Exams */}
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
               <div className="flex items-center justify-between mb-4">
@@ -1329,7 +1332,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               )}
             </div>
-          </div>
+          </ScrollReveal>
         </div>
       )}
 
@@ -1507,9 +1510,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* 3. STUDENTS TAB */}
       {activeTab === 'students' && (
-        <div className="space-y-6">
+        <ScrollReveal className="space-y-6">
           {/* Student KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Total Students"
               value={students.length}
@@ -1538,9 +1541,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               icon={<BookOpen className="w-5 h-5 text-purple-600 dark:text-purple-400" />}
               isLoading={isLoadingData}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Students ({filteredStudents.length})
@@ -1580,7 +1583,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </button>
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollReveal className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-xs font-medium border-b border-slate-200 dark:border-slate-700">
@@ -1672,14 +1675,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollReveal>
           )}
-        </div>
-        </div>
+        </ScrollReveal>
+        </ScrollReveal>
       )}
 
       {/* 4. EXAMS TAB */}
       {activeTab === 'exams' && (
+        <ScrollReveal>
         <TeacherExamScheduler
           exams={exams}
           questions={questions}
@@ -1688,13 +1692,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           onDeleteExam={onDeleteExam}
           onStatusChange={onStatusChange}
         />
+        </ScrollReveal>
       )}
 
       {/* 5. QUESTION BANK TAB */}
       {activeTab === 'questions' && (
         <div className="space-y-6">
           {/* Question Bank KSI Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <ScrollReveal className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <KpiCard
               label="Total Questions"
               value={questions.length}
@@ -1723,9 +1728,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               icon={<FileText className="w-5 h-5 text-amber-600 dark:text-amber-400" />}
               isLoading={isLoadingData}
             />
-          </div>
+          </ScrollReveal>
 
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <ScrollReveal className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
             <div className="p-6 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <h2 className="text-[20px] font-semibold text-slate-900 dark:text-white leading-snug">
                 Question Bank ({questions.length})
@@ -1747,7 +1752,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 : 'No questions yet.'}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <ScrollReveal className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-[13.5px] font-semibold border-b border-slate-200 dark:border-slate-700">
@@ -1814,15 +1819,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollReveal>
           )}
-        </div>
+        </ScrollReveal>
         </div>
       )}
 
       {/* Results: choose an exam before loading its records. */}
       {activeTab === 'results' && (
-        <div className="space-y-6">
+        <ScrollReveal className="space-y-6">
           {!selectedResultExamId ? (
             <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
               <div className="flex flex-col gap-4 border-b border-slate-200 p-5 dark:border-slate-700 sm:flex-row sm:items-center sm:justify-between">
@@ -1867,16 +1872,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </section>
             </div>;
           })()}
-        </div>
+        </ScrollReveal>
       )}
 
       {/* Proctoring is split into current live operations and exam-scoped history. */}
       {(activeTab === 'proctoring' || activeTab === 'monitoring_history') && (
-        <div className="space-y-5">
+        <ScrollReveal className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold text-slate-900 dark:text-white">Exam monitoring</h2><p className="text-sm text-slate-500 dark:text-slate-400">Choose an exam to load its attempts and proctoring events.</p></div><div className="inline-flex rounded-lg border border-slate-200 bg-white p-1 dark:border-slate-700 dark:bg-slate-800"><button type="button" onClick={() => onNavigateTab(activeTab === 'monitoring_history' ? 'proctoring' : 'monitoring_history')} className="rounded-md px-3 py-1.5 text-sm font-medium bg-blue-600 text-white">{isMonitoringHistory ? 'Live monitoring' : 'Monitoring history'}</button></div></div>
           {!selectedProctoringExamId ? <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700"><h3 className="font-semibold text-slate-900 dark:text-white">{isMonitoringHistory ? 'Ended and completed exams' : 'Currently live exams'}</h3><label className="relative"><Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" /><input aria-label="Search monitoring exams" value={monitoringSearchTerm} onChange={event => setMonitoringSearchTerm(event.target.value)} placeholder="Search exams" className="h-9 w-56 rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white" /></label></div>{visibleMonitoringExams.length ? <div className="divide-y divide-slate-200 dark:divide-slate-700">{visibleMonitoringExams.map(exam => <button key={exam.examId} type="button" onClick={() => { setProctoringEvents([]); setAttempts([]); setMonitoringResults([]); setSelectedProctoringExamId(exam.examId); setShowMonitoringInsights(false); setSelectedProctoringDetail(null); }} className="flex w-full flex-col gap-2 p-5 text-left hover:bg-slate-50 dark:hover:bg-slate-700/30 sm:flex-row sm:items-center sm:justify-between"><span><span className="block font-semibold text-slate-900 dark:text-white">{exam.title}</span><span className="mt-1 block text-sm text-slate-500 dark:text-slate-400">{exam.subject || 'Unspecified subject'} · {exam.examId}</span></span><span className="flex items-center gap-3"><StatusBadge status={exam.status} /><span className="text-sm font-semibold text-blue-600 dark:text-blue-400">Open {isMonitoringHistory ? 'report' : 'monitor'} →</span></span></button>)}</div> : <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">{isMonitoringHistory ? 'No ended or completed exams are available.' : 'No exams are currently live.'}</div>}</section> : <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><button type="button" onClick={() => { setSelectedProctoringExamId(null); setProctoringEvents([]); setAttempts([]); setMonitoringResults([]); setSelectedProctoringDetail(null); setShowMonitoringInsights(false); setSelectedProctoringDetail(null); }} className="mb-2 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400">← {isMonitoringHistory ? 'Monitoring history' : 'Live exams'}</button><h3 className="text-xl font-semibold text-slate-900 dark:text-white">{selectedMonitoringExam?.title || selectedProctoringExamId}</h3><p className="text-sm text-slate-500 dark:text-slate-400">{selectedMonitoringExam?.subject || 'Exam'} · {selectedProctoringExamId}</p></div><div className="flex gap-2"><button type="button" onClick={() => void refreshExamMonitoringData(selectedProctoringExamId)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700"><RefreshCw className="h-4 w-4" />Refresh</button><button type="button" onClick={() => setShowMonitoringInsights(true)} className="h-9 rounded-lg bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700">View exam report</button></div></div>{monitoringError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">{monitoringError}</p>}{isLoadingMonitoring ? <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800">Loading exam monitoring data…</div> : <><div className="grid grid-cols-2 gap-3 md:grid-cols-4"><KpiCard label="Active attempts" value={attempts.filter(attempt => attempt.status === 'IN_PROGRESS').length} subValue="Currently in progress" icon={<ShieldAlert className="h-5 w-5 text-blue-600" />} /><KpiCard label="Proctoring events" value={selectedExamProctoringEvents.length} subValue="Only this exam" icon={<Activity className="h-5 w-5 text-amber-600" />} /><KpiCard label="High / critical" value={criticalEventsCount} subValue="Events requiring review" icon={<ShieldAlert className="h-5 w-5 text-rose-600" />} /><KpiCard label="Submitted attempts" value={submittedAttemptsCount} subValue="Completed submissions" icon={<CheckCircle className="h-5 w-5 text-emerald-600" />} /></div><section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><h4 className="border-b border-slate-200 p-4 font-semibold text-slate-900 dark:border-slate-700 dark:text-white">Candidate attempts ({attempts.length})</h4>{attempts.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-500 dark:bg-slate-900/50 dark:text-slate-400"><tr><th className="p-3">Student</th><th className="p-3">Status</th><th className="p-3">Warnings</th><th className="p-3 text-right">Action</th></tr></thead><tbody className="divide-y divide-slate-200 dark:divide-slate-700">{attempts.filter(attempt => attempt.examId === selectedProctoringExamId).map(attempt => <tr key={attempt.attemptId}><td className="p-3"><div className="font-medium text-slate-900 dark:text-white">{attempt.studentName || attempt.studentId}</div><div className="text-xs text-slate-500">{attempt.studentId}</div></td><td className="p-3"><StatusBadge status={attempt.proctoringStatus || attempt.status} /></td><td className="p-3">{attempt.warningCount ?? 0}</td><td className="p-3 text-right">{attempt.status === 'IN_PROGRESS' && <button type="button" onClick={() => handleTerminateAttempt(attempt.attemptId, attempt.studentName)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300">Terminate</button>}</td></tr>)}</tbody></table></div> : <div className="p-8 text-center text-sm text-slate-500">No candidate attempts for this exam.</div>}</section><section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><h4 className="border-b border-slate-200 p-4 font-semibold text-slate-900 dark:border-slate-700 dark:text-white">Event history ({selectedExamProctoringEvents.length})</h4>{selectedExamProctoringEvents.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-500 dark:bg-slate-900/50 dark:text-slate-400"><tr><th className="p-3">Time</th><th className="p-3">Student</th><th className="p-3">Event</th><th className="p-3">Severity</th><th className="p-3 text-right">Details</th></tr></thead><tbody className="divide-y divide-slate-200 dark:divide-slate-700">{selectedExamProctoringEvents.slice(0, 100).map(event => <tr key={event.eventId}><td className="whitespace-nowrap p-3 text-slate-500">{new Date(event.timestamp).toLocaleString()}</td><td className="p-3">{event.studentName || event.studentId}</td><td className="p-3">{event.eventType}</td><td className="p-3"><StatusBadge status={event.severity} /></td><td className="p-3 text-right"><button type="button" onClick={() => setSelectedProctoringDetail(event)} className="font-medium text-blue-600 hover:underline dark:text-blue-400">Review</button></td></tr>)}</tbody></table></div> : <div className="p-8 text-center text-sm text-slate-500">No proctoring events for this exam.</div>}</section></>}</div>}
           {showMonitoringInsights && selectedProctoringExamId && <ProctoringExamInsightsModal exam={selectedMonitoringExam} examId={selectedProctoringExamId} events={selectedExamProctoringEvents} results={monitoringResults} isStudent={false} onClose={() => setShowMonitoringInsights(false)} />}
-        </div>
+        </ScrollReveal>
       )}
 
       {/* Queries: choose an exam before loading its records. */}
@@ -2648,7 +2653,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           ) : (
             <div className="space-y-6">
                 {/* Profile Summary Grid */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700 text-[14px]">
+            <ScrollReveal className="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700 text-[14px]">
                   <div>
                     <span className="text-[13px] text-slate-400 block">Full Name</span>
                     <span className="font-semibold text-slate-900 dark:text-white text-[15px]">
@@ -2779,7 +2784,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         : '—'}
                     </span>
                   </div>
-                </div>
+                </ScrollReveal>
+
                 <StudentAssessmentSections details={selectedStudentDetails} />
               </div>
             )}
@@ -2980,5 +2986,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       />
       <ConfirmModal />
     </div>
+    </PageMotionShell>
   );
 };

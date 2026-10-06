@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { StudentDetailsData, StudentExamHistoryItem } from '../../types';
+import { ScrollReveal } from '../common/SharedUI';
 
 interface Props {
   details: StudentDetailsData;
@@ -103,6 +104,7 @@ export default function StudentAssessmentSections({ details }: Props) {
 
   return (
     <div className="space-y-5">
+      <ScrollReveal>
       <section className="space-y-3">
         <div>
           <h3 className="text-base font-semibold text-slate-900 dark:text-white">Overall Performance</h3>
@@ -122,6 +124,9 @@ export default function StudentAssessmentSections({ details }: Props) {
         </div>
       </section>
 
+      </ScrollReveal>
+
+      <ScrollReveal>
       <section className="grid md:grid-cols-2 gap-4">
         <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
           <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Score Trend</h3>
@@ -169,6 +174,9 @@ export default function StudentAssessmentSections({ details }: Props) {
         </div>
       </section>
 
+      </ScrollReveal>
+
+      <ScrollReveal>
       <section className="space-y-3">
         <div className="flex items-end justify-between gap-3">
           <div>
@@ -264,6 +272,7 @@ export default function StudentAssessmentSections({ details }: Props) {
           </div>
         </div>
       </section>
+      </ScrollReveal>
     </div>
   );
 }

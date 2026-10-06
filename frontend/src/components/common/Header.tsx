@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   LogOut,
   Sun,
@@ -108,6 +108,19 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [isHeaderCompact, setIsHeaderCompact] = useState(false);
+
+  useEffect(() => {
+    if (!user || hideSidebar) return;
+
+    const handleScroll = () => {
+      setIsHeaderCompact(window.scrollY > 10);
+    };
+
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [hideSidebar, user]);
 
   const navItems = getNavItemsForRole(user?.role);
   const activeNavItem = navItems.find(item => item.id === activeTab);
@@ -190,28 +203,46 @@ export const Header: React.FC<HeaderProps> = ({
                   onClick={() => handleNavClick(item.id)}
                   title={sidebarCollapsed ? item.label : undefined}
                   aria-label={item.label}
-                  className={`group relative w-full h-11 flex items-center rounded-lg text-[14.5px] font-medium transition-colors ${
+                  className={`examx-nav-item group relative w-full h-11 flex items-center rounded-lg text-[14.5px] font-medium overflow-hidden ${
                     sidebarCollapsed ? 'justify-center px-2' : 'gap-3 px-3.5 text-left'
                   } ${
                     isActive
-                      ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60 hover:text-slate-900 dark:hover:text-white'
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                   }`}
                 >
-                  <Icon
-                    className={`w-[18px] h-[18px] shrink-0 ${
+                  <span
+                    aria-hidden="true"
+                    className={`absolute inset-0 rounded-lg transition-all duration-200 ease-out ${
                       isActive
-                        ? 'text-blue-600 dark:text-blue-400'
-                        : 'text-slate-400 dark:text-slate-500 group-hover:text-slate-600 dark:group-hover:text-slate-300'
+                        ? 'bg-blue-50 dark:bg-blue-950/60 shadow-sm'
+                        : 'bg-transparent group-hover:bg-slate-100 dark:group-hover:bg-slate-800/60'
                     }`}
+                    style={{
+                      transform: isActive ? 'scale(1)' : 'scale(0.98)',
+                      opacity: isActive ? 1 : 0.9
+                    }}
                   />
-                  {!sidebarCollapsed ? (
-                    <span className="truncate leading-snug">{item.label}</span>
-                  ) : (
-                    <span className="pointer-events-none fixed left-[78px] px-2.5 py-1.5 rounded-md bg-slate-900 text-white text-[13px] font-medium whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity shadow-md z-50">
-                      {item.label}
-                    </span>
-                  )}
+                  <span
+                    className={`relative z-10 flex items-center ${
+                      sidebarCollapsed ? 'justify-center w-full h-full' : 'gap-3 w-full'
+                    }`}
+                  >
+                    <Icon
+                      className={`w-[18px] h-[18px] shrink-0 transition-all duration-200 ${
+                        isActive
+                          ? 'text-blue-600 dark:text-blue-400 scale-105'
+                          : 'text-slate-400 dark:text-slate-500 group-hover:text-slate-600 dark:group-hover:text-slate-300'
+                      }`}
+                    />
+                    {!sidebarCollapsed ? (
+                      <span className="truncate leading-snug">{item.label}</span>
+                    ) : (
+                      <span className="pointer-events-none fixed left-[78px] px-2.5 py-1.5 rounded-md bg-slate-900 text-white text-[13px] font-medium whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity shadow-md z-50">
+                        {item.label}
+                      </span>
+                    )}
+                  </span>
                 </button>
               );
             })}
@@ -296,11 +327,11 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Top Header Bar */}
       <header
-        className={`sticky top-0 z-30 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 transition-all duration-200 ease-in-out ${
+        className={`sticky top-0 z-30 border-b border-slate-200 dark:border-slate-800 transition-all duration-200 ease-in-out ${
           user && !hideSidebar ? (sidebarCollapsed ? 'lg:pl-[72px]' : 'lg:pl-[256px]') : ''
-        }`}
+        } ${isHeaderCompact ? 'bg-white/90 dark:bg-slate-900/85 shadow-[0_8px_24px_-18px_rgba(15,23,42,0.28)] backdrop-blur-sm' : 'bg-white dark:bg-slate-900'} `}
       >
-        <div className="h-16 px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
+        <div className={`px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4 transition-all duration-200 ${isHeaderCompact ? 'h-14' : 'h-16'}`}>
           {/* Left: Mobile Menu Button + Breadcrumb */}
           <div className="flex items-center gap-3 min-w-0">
             {user && !hideSidebar && (

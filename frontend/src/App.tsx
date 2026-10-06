@@ -1371,56 +1371,62 @@ export default function App() {
           </div>
         )}
         {view === ViewState.DASHBOARD && currentUser?.role === UserRole.STUDENT && (
-          <StudentDashboard
-            user={currentUser}
-            activeTab={activeTab}
-            onNavigateTab={setActiveTab}
-            results={allResults}
-            queries={allQueries}
-            exams={scheduledExams}
-            onStartExam={handleStartExam}
-            onRaiseQuery={handleRaiseQuery}
-            onRefreshData={() => loadRoleData(currentUser)}
-            onRefreshExamData={refreshExaminationData}
-          />
+          <div>
+            <StudentDashboard
+              user={currentUser}
+              activeTab={activeTab}
+              onNavigateTab={setActiveTab}
+              results={allResults}
+              queries={allQueries}
+              exams={scheduledExams}
+              onStartExam={handleStartExam}
+              onRaiseQuery={handleRaiseQuery}
+              onRefreshData={() => loadRoleData(currentUser)}
+              onRefreshExamData={refreshExaminationData}
+            />
+          </div>
         )}
 
         {view === ViewState.DASHBOARD && currentUser?.role === UserRole.TEACHER && (
-          <TeacherDashboard
-            user={currentUser}
-            activeTab={activeTab}
-            onNavigateTab={setActiveTab}
-            questions={questionBank}
-            exams={scheduledExams}
-            onAddQuestion={handleAddQuestion}
-            onUpdateQuestion={handleUpdateQuestion}
-            onDeleteQuestion={handleDeleteQuestion}
-            onPublishResult={handlePublishResult}
-            onStatusChange={handleUpdateExamStatus}
-            onResolveQueryDetailed={handleResolveQueryDetailed}
-            onSaveExam={handleSaveExam}
-            onDeleteExam={handleDeleteExam}
-            onRefreshData={() => loadRoleData(currentUser)}
-            onRefreshExamData={refreshExaminationData}
-          />
+          <div>
+            <TeacherDashboard
+              user={currentUser}
+              activeTab={activeTab}
+              onNavigateTab={setActiveTab}
+              questions={questionBank}
+              exams={scheduledExams}
+              onAddQuestion={handleAddQuestion}
+              onUpdateQuestion={handleUpdateQuestion}
+              onDeleteQuestion={handleDeleteQuestion}
+              onPublishResult={handlePublishResult}
+              onStatusChange={handleUpdateExamStatus}
+              onResolveQueryDetailed={handleResolveQueryDetailed}
+              onSaveExam={handleSaveExam}
+              onDeleteExam={handleDeleteExam}
+              onRefreshData={() => loadRoleData(currentUser)}
+              onRefreshExamData={refreshExaminationData}
+            />
+          </div>
         )}
 
         {view === ViewState.DASHBOARD && currentUser?.role === UserRole.ADMIN && (
-          <AdminDashboard
-            user={currentUser}
-            activeTab={activeTab}
-            onNavigateTab={setActiveTab}
-            exams={scheduledExams}
-            results={allResults}
-            queries={allQueries}
-            onSaveExam={handleSaveExam}
-            onDeleteExam={handleDeleteExam}
-            onPublishResult={handlePublishResult}
-            onStatusChange={handleUpdateExamStatus}
-            onResolveQuery={handleResolveQuery}
-            onRefreshGlobalData={() => loadRoleData(currentUser)}
-            onRefreshExamData={refreshExaminationData}
-          />
+          <div>
+            <AdminDashboard
+              user={currentUser}
+              activeTab={activeTab}
+              onNavigateTab={setActiveTab}
+              exams={scheduledExams}
+              results={allResults}
+              queries={allQueries}
+              onSaveExam={handleSaveExam}
+              onDeleteExam={handleDeleteExam}
+              onPublishResult={handlePublishResult}
+              onStatusChange={handleUpdateExamStatus}
+              onResolveQuery={handleResolveQuery}
+              onRefreshGlobalData={() => loadRoleData(currentUser)}
+              onRefreshExamData={refreshExaminationData}
+            />
+          </div>
         )}
 
         {/* EXAM INTRO */}

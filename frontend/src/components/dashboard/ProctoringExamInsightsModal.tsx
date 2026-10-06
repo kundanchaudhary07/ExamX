@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import {
   Bar,
@@ -16,6 +16,7 @@ import {
 } from 'recharts';
 import { ProctoringEventRecord, ScheduledExam, StudentResult } from '../../types';
 import { dbService } from '../../services/dbService';
+import { ScrollReveal } from '../common/SharedUI';
 
 type StudentRankings = Awaited<ReturnType<typeof dbService.getMyRankings>>;
 
@@ -77,6 +78,7 @@ export const ProctoringExamInsightsModal: React.FC<ProctoringExamInsightsModalPr
   const [studentRankings, setStudentRankings] = useState<StudentRankings | null>(null);
   const [isLoadingRankings, setIsLoadingRankings] = useState(false);
   const [rankingsError, setRankingsError] = useState<string | null>(null);
+  const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const safeEvents = useMemo(
     () => events.filter(event => event.examId === examId && (!isStudent || event.studentId === studentId)),
     [events, examId, isStudent, studentId]
@@ -283,7 +285,8 @@ export const ProctoringExamInsightsModal: React.FC<ProctoringExamInsightsModalPr
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
+        <div ref={scrollRootRef} className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
+          <ScrollReveal root={scrollRootRef}>
           <section aria-label="Exam proctoring summary">
             <div className="mb-3 flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Exam Analytics</h3>
@@ -309,7 +312,9 @@ export const ProctoringExamInsightsModal: React.FC<ProctoringExamInsightsModalPr
               ))}
             </div>
           </section>
+          </ScrollReveal>
 
+          <ScrollReveal root={scrollRootRef}>
           <section>
             <h3 className="mb-3 text-sm font-semibold text-slate-900 dark:text-white">Event Analytics</h3>
             <div className="grid gap-4 lg:grid-cols-2">
@@ -365,7 +370,9 @@ export const ProctoringExamInsightsModal: React.FC<ProctoringExamInsightsModalPr
               </div>
             </div>
           </section>
+          </ScrollReveal>
 
+          <ScrollReveal root={scrollRootRef}>
           <section className="grid gap-4 lg:grid-cols-2">
             <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
               <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Exam Rank</h3>
@@ -435,7 +442,9 @@ export const ProctoringExamInsightsModal: React.FC<ProctoringExamInsightsModalPr
               )}
             </div>
           </section>
+          </ScrollReveal>
 
+          <ScrollReveal root={scrollRootRef}>
           <section>
             <div className="mb-2 flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Proctoring Audit Trail</h3>
@@ -488,6 +497,7 @@ export const ProctoringExamInsightsModal: React.FC<ProctoringExamInsightsModalPr
               </div>
             )}
           </section>
+          </ScrollReveal>
         </div>
       </section>
     </div>
